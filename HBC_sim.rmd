@@ -1,0 +1,3137 @@
+---
+title: "心拍検出課題の信頼性に関する現状確認と提案"
+author: "kazushi SHINAGAWA"
+date: "`r format(Sys.time(), '%Y/%m/%d')`"
+output:
+  html_document: 
+  pdf_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(Rcpp)
+library(bayesplot)
+library(patchwork)
+library(ggridges)
+library(data.table)
+library(gridExtra)
+library(viridis) 
+library(tidyverse)
+library(pROC)
+library(confintr)
+library(gridExtra)
+library(confintr)
+library(gganimate)
+library(transformr)
+library(DT)
+library(tiff)
+library(ggfittext)
+library(RColorBrewer)
+library(pwr)
+library(DiagrammeR)
+
+#以下使用するfunctionの作成
+#心拍カウントのエラー率
+hbc<-function(real,reports){
+  abs(real-trunc(reports))/real
+}
+
+
+old_hbc<-function(real,reports){
+  if(trunc(reports) < 0){
+    a <- 0
+  }
+  else{
+    a <- trunc(reports)
+  }
+    1-abs(real-a)/real
+}
+
+new_hbc<-function(real,reports){
+    if(trunc(reports) < 0){
+    a <- 0
+  }
+  else{
+    a <- trunc(reports)
+  }
+    1-(abs(real-a)/((real+a)/2))
+}
+
+#成績の生成
+sim_data_production <- function(sequence, sample_n, probs){
+  sim_da<-c()
+  for(i in sequence){
+    sim = data.frame(reported = rbinom(sample_n,i,probs))
+    sim_da = rbind(sim_da, sim)
+  }
+  sim_da
+}
+
+#何度もトライアルを出して平均化する過程
+est_means_data <- function(sequence, sample_n, probs, mean_ns){
+  meandata<-list()
+  for (i in 1:mean_ns){
+    actual <- rep(sequence,each=sample_n)
+    d<-cbind(sim_data_production(sequence, sample_n, probs),actual)
+    da <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- hbc(d[j,2],d[j,1])
+    }
+    meandata[[i]] <- do.call(rbind,da)
+  }
+  meandata
+}
+
+#成績の生成
+sim_normal_production <- function(sequence, sample_n, sd, bias){
+  sim_da<-c()
+  for(i in sequence){
+    sim = data.frame(reported = rnorm(sample_n,i*bias,sd))
+    sim_da = rbind(sim_da, sim)
+  }
+  sim_da
+}
+
+#何度もトライアルを出して平均化する過程
+est_means_normal <- function(sequence, sample_n, sd,bias, mean_ns){
+  meandata<-list()
+  for (i in 1:mean_ns){
+    actual <- rep(sequence,each=sample_n)
+    d<-cbind(sim_normal_production(sequence, sample_n, sd, bias),actual)
+    da <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- hbc(d[j,2],d[j,1])
+    }
+    meandata[[i]] <- do.call(rbind,da)
+  }
+  meandata
+}
+
+#何度もトライアルを出して平均化する過程
+means_somet_normal <- function(sequence, sd, bias){
+  meandata<-list()
+  for (i in 1:length(sequence)){
+    actual <- sequence[[i]]
+    d<-cbind(sim_normal_production(sequence[[i]], 1, sd, bias),actual)
+    da <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- hbc(d[j,2],d[j,1])
+    }
+    meandata[[i]] <- do.call(rbind,da)
+  }
+  meandata
+}
+
+
+sim_normal_prod <- function(time, sd, bias){
+  sim_da<-c()
+  sim = data.frame(reported = rnorm(1,time*bias,sd))
+  sim_da = rbind(sim_da, sim)
+  sim_da
+}
+
+#比較用
+compare_met <- function(sequence, sd, bias){
+  meandata_old<-list()
+  meandata_new<-list()
+  for (i in 1:length(sequence)){
+    actual <- sequence[[i]]
+    d<-cbind(sim_normal_prod(sequence[[i]],sd, bias),actual)
+    do <- list()
+    dn <- list()
+    for(j in 1:length(actual)){
+      do[[j]] <- old_hbc(d[j,2],d[j,1])
+      dn[[j]] <- new_hbc(d[j,2],d[j,1])
+    }
+    meandata_old[[i]] <- do.call(rbind,do)
+    meandata_new[[i]] <- do.call(rbind,dn)
+  }
+  olddata<-do.call(rbind,meandata_old)
+  newdata<-do.call(rbind,meandata_new)
+  
+  cbind(group=c(rep("old",nrow(olddata)),rep("new",nrow(newdata))),data=
+        rbind(olddata,newdata))
+}
+
+
+#function作成
+make_BPM <- function(sample,mean_v, sd_v){
+  pure_BPM <- rnorm(sample,mean_v, sd_v)
+  pure_BPM/mean(pure_BPM)
+}
+
+sample_rep <- function(real_beat,prob){
+  report_lists <- list()
+  for(i in 1:length(real_beat)){
+    report_lists [[i]] <- rbinom(1,real_beat[i],prob)
+  }
+  do.call(rbind,report_lists) %>% as.vector()
+}
+
+
+#何度もトライアルを出して平均化する過程〜new ver.~
+est_means_data_new <- function(sequence, sample_n, probs, mean_ns){
+  meandata<-list()
+  for (i in 1:mean_ns){
+    actual <- rep(sequence,each=sample_n)
+    d<-cbind(sim_data_production(sequence, sample_n, probs),actual)
+    da <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- new_hbc(d[j,2],d[j,1])
+    }
+    meandata[[i]] <- do.call(rbind,da)
+  }
+  meandata
+}
+
+#何度もトライアルを出して平均化する過程~new ver.~
+est_means_normal_new <- function(sequence, sample_n, sd,bias, mean_ns){
+  meandata<-list()
+  for (i in 1:mean_ns){
+    actual <- rep(sequence,each=sample_n)
+    d<-cbind(sim_normal_production(sequence, sample_n, sd, bias),actual)
+    da <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- new_hbc(d[j,2],d[j,1])
+    }
+    meandata[[i]] <- do.call(rbind,da)
+  }
+  meandata
+}
+
+#comp
+comp_est_means_normal <- function(sequence, sample_n, sd,bias, mean_ns){
+  meandata<-list()
+  meandatan<-list()
+  for (i in 1:mean_ns){
+    actual <- rep(sequence,each=sample_n)
+    d<-cbind(sim_normal_production(sequence, sample_n, sd, bias),actual)
+    da <- list()
+    dan <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- hbc(d[j,2],d[j,1])
+      dan[[j]] <- new_hbc(d[j,2],d[j,1])
+    }
+   # ol_d <- do.call(rbind,da)
+   # ne_d <- do.call(rbind,dan)
+   # meandata[[i]] <- cbind(gr = rep("old",nrow(ol_d)),ol_d)
+  #  meandatan[[i]] <- cbind(gr = rep("new",nrow(ol_d)),ne_d)
+     meandata[[i]] <- do.call(rbind,da)
+     meandatan[[i]] <- do.call(rbind,dan)
+  }
+  #rbind(do.call(rbind,meandata),
+  #  do.call(rbind,meandatan))
+  c(meandata,meandatan)
+}
+
+#何度もトライアルを出して平均化する過程~new ver.~
+means_somet_normal_new <- function(sequence, sd, bias){
+  meandata<-list()
+  for (i in 1:length(sequence)){
+    actual <- sequence[[i]]
+    d<-cbind(sim_normal_production(sequence[[i]], 1, sd, bias),actual)
+    da <- list()
+    for(j in 1:length(actual)){
+      da[[j]] <- new_hbc(d[j,2],d[j,1])
+    }
+    meandata[[i]] <- do.call(rbind,da)
+  }
+  meandata
+}
+
+count_overlap <- function(data){
+  count_list <- list()
+  plis <- unique(data$probs)
+  beat_vec <- unique(data$real)
+  sampling_times <- subset(data,
+                           data$probs==plis[1] &
+                           data$real==beat_vec[1]) %>% nrow
+  
+  for(j in 1:length(beat_vec)){
+        counts <- c()
+  for(i in 1:length(plis)){
+      #最大，最小で分ける
+    dec <- subset(data,                    
+                  data$probs==plis[i] &                   
+                    data$real==beat_vec[j])
+    
+    if(i == 1){
+      #一番上の分布が，一つ下と被る確率
+      thr_max <- subset(data,                    
+                  data$probs==plis[2] &                   
+                    data$real==beat_vec[j])$Acc %>% max
+      co <- subset(dec,                    
+                  dec$Acc <= thr_max) %>% nrow
+      
+    }
+    else if(i == length(plis)){
+      thr_min <- subset(data,                    
+                  data$probs==plis[i-1] &                   
+                    data$real==beat_vec[j])$Acc %>% min
+      co <- subset(dec,                    
+                  dec$Acc >= thr_min) %>% nrow
+    }
+    else{
+      thr_max <- subset(data,                    
+                  data$probs==plis[i+1] &                   
+                    data$real==beat_vec[j])$Acc %>% max
+      thr_min <- subset(data,                    
+                  data$probs==plis[i-1] &                   
+                    data$real==beat_vec[j])$Acc %>% min
+      
+      ao <- subset(dec,                    
+                  dec$Acc <= thr_max) %>% nrow
+      bo <- subset(dec,                    
+                  dec$Acc >= thr_min) %>% nrow
+      co <- ao + bo
+    }
+    counts <- rbind(counts,data.frame(parce = co/sampling_times,prob = plis[i], beat = beat_vec[j]
+    ))
+  }
+    count_list[[j]] <- counts
+  }
+  do.call(rbind,count_list)
+}
+
+count_overlap_new <- function(data){
+  count_list <- list()
+  plis <- unique(data$probs)
+  beat_vec <- unique(data$real)
+  sampling_times <- subset(data,
+                           data$probs==plis[1] &
+                           data$real==beat_vec[1]) %>% nrow
+  
+  for(j in 1:length(beat_vec)){
+        counts <- c()
+   for(i in 1:length(plis)){
+      #最大，最小で分ける
+     dec <- subset(data,                    
+                  data$probs==plis[i] &
+                    data$real==beat_vec[j])
+    
+     if(i == length(plis)){
+      #一番上の分布が，一つ下と被る確率
+       thr_max <- subset(data,                    
+                   data$probs==plis[i-1] & 
+                      data$real==beat_vec[j])$Acc %>% max
+        co <- subset(dec,                    
+                   dec$Acc <= thr_max) %>% nrow
+       
+     }
+     else if(i == 1){
+      thr_min <- subset(data,                    
+                  data$probs==plis[2] &               
+                    data$real==beat_vec[j])$Acc %>% min
+      co <- subset(dec,                    
+                  dec$Acc >= thr_min) %>% nrow
+    }
+     else{
+      thr_max <- subset(data,                    
+                  data$probs==plis[i-1] &             
+                    data$real==beat_vec[j])$Acc %>% max
+      
+      thr_min <- subset(data,                    
+                  data$probs==plis[i+1] &             
+                    data$real==beat_vec[j])$Acc %>% min
+      
+      ao <- subset(dec,                    
+                  dec$Acc <= thr_max) %>% nrow
+      bo <- subset(dec,                    
+                  dec$Acc >= thr_min) %>% nrow
+      co <- ao + bo
+    }
+    counts <- rbind(counts,data.frame(parce = co/sampling_times,prob = plis[i], beat = beat_vec[j]
+    ))
+  }
+    count_list[[j]] <- counts
+  }
+  do.call(rbind,count_list)
+}
+
+pick_first_zero <- function(data, prob){
+  tr <- unique(data$trialN)
+  dats <- c()
+  for(i in 1:length(tr)){
+    num <-  which(data[data$trialN==tr[i],]$mean <= prob)[1]
+    dats <- append(dats,data[data$trialN==tr[i],]$beat[num]
+     )
+  }
+  data.frame(trialN = tr,beat = dats)
+}
+
+overlap_counter <- function(plt_list, sample_n){
+p<-do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=50)+geom_vline(xintercept = slis, col = "red")+labs(fill="Bias")+xlab("Score")+ylab("Count")
+
+pd <- ggplot_build(p)[["data"]][[1]] %>% select(fill,count,x)
+#一番左側にくる色を検索
+pd <-pd %>% pivot_wider(names_from = "fill", values_from = "count")
+colnames(pd)<-c("level","A","B","C","D")
+
+pd$level <- 1:nrow(pd)
+#探索レンジを探す
+expd <- ncol(pd)-1
+all_count<-c()
+  for(i in 1:expd){
+    if(i == 1){
+     checkd<-pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      frame <- data.frame(level=(checkd$level %>% min):(checkd$level %>% max),
+                          B = rep(0,length((checkd$level %>% min):(checkd$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+
+      #ひとつ後との比較用
+      compA <- pd[,c(1,i+2)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      frame <- data.frame(level=(compA$level %>% min):(compA$level %>% max),
+                          B = rep(0,length((compA$level %>% min):(compA$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #右端の最小値から，その次の分布の最大値までが重なっている領域
+      check_range <- (checkd[1,1][1]):(compA[nrow(compA),1])
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+    }
+    else if(i == expd){
+      #最後は左端に来てるやつ
+      checkd <- pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      frame <- data.frame(level=(checkd$level %>% min):(checkd$level %>% max),
+                          B = rep(0,length((checkd$level %>% min):(checkd$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      #ひとつ前との比較用
+      compA <- pd[,c(1,i)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      frame <- data.frame(level=(compA$level %>% min):(compA$level %>% max),
+                          B = rep(0,length((compA$level %>% min):(compA$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #その次の分布の最小値から，左端の最大値までが重なっている領域
+      check_range <- (compA[1,1][1]):(checkd[nrow(checkd),1])
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+    }
+    else{
+      #最後は左端に来てるやつ
+      checkd<-pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      frame <- data.frame(level=(checkd$level %>% min):(checkd$level %>% max),
+                          B = rep(0,length((checkd$level %>% min):(checkd$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      #ひとつ前との比較用
+      compA <- pd[,c(1,i)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      frame <- data.frame(level=(compA$level %>% min):(compA$level %>% max),
+                          B = rep(0,length((compA$level %>% min):(compA$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #ひとつ後との比較用
+      compB <- pd[,c(1,i+2)]
+      compB <- compB[compB[,2]>0,] %>% as.data.frame()
+      
+      frame <- data.frame(level=(compB$level %>% min):(compB$level %>% max),
+                          B = rep(0,length((compB$level %>% min):(compB$level %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compB[,1]){
+           frame[j,2] <- compB[which(compB$level==frame[j,1]),2]
+        }
+      }
+      compB <- frame
+      
+      #その次の分布の最小値から，左端の最大値までが重なっている領域
+      check_range <- (compA[1,1][1]):(checkd[nrow(checkd),1])
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+      #右端の最小値から，その次の分布の最大値までが重なっている領域
+      check_range <- (checkd[1,1][1]):(compB[nrow(compB),1])
+      
+      #オーバーラップしたやつをカウント
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compB[compB$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compB[compB$level==j,2])){
+          counted <- append(counted, compB[compB$level==j,2])
+        }
+      }
+    }
+    all_count<- append(all_count,sum(counted))
+  }
+  all_count/sample_n
+}
+
+multiple_overlap_counter <- function(data, sample_n){
+  multi_list <- list()
+  beat_vec <- unique(data$real)
+  
+  for(k in 1:length(beat_vec)){
+    plt_list <- subset(data,data$real == beat_vec[k])
+    plt_list <- plt_list[,-2]
+    colnames(plt_list) <- c("Acc","bias")
+    
+  p<-plt_list %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+   geom_histogram(position = "identity",alpha=.75,bins=50)+geom_vline(xintercept =slis, col = "red")+labs(fill="Bias")+xlab("Score")+ylab("Count")
+
+  pd <- ggplot_build(p)[["data"]][[1]] %>% select(fill,count,x)
+  #一番左側にくる色を検索
+  pd <-pd %>% pivot_wider(names_from = "fill", values_from = "count")
+  colnames(pd)<-c("level","A","B","C","D")
+
+  pd$level <- 1:nrow(pd)
+  #探索レンジを探す
+  expd <- ncol(pd)-1
+  all_count<-c()
+  for(i in 1:expd){
+    if(i == 1){
+     checkd<-pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+
+      #ひとつ後との比較用
+      compA <- pd[,c(1,i+2)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      #右端の最小値から，その次の分布の最大値までが重なっている領域
+      check_range <- (checkd[1,1][1]):(compA[nrow(compA),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range%>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+    }
+    else if(i == expd){
+      #最後は左端に来てるやつ
+      checkd <- pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      
+      #ひとつ前との比較用
+      compA <- pd[,c(1,i)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      #その次の分布の最小値から，左端の最大値までが重なっている領域
+      check_range <- (compA[1,1][1]):(checkd[nrow(checkd),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+    }
+    else{
+      #最後は左端に来てるやつ
+      checkd<-pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      
+      #ひとつ前との比較用
+      compA <- pd[,c(1,i)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      #ひとつ後との比較用
+      compB <- pd[,c(1,i+2)]
+      compB <- compB[compB[,2]>0,] %>% as.data.frame()
+      
+      #その次の分布の最小値から，左端の最大値までが重なっている領域
+      check_range <- (compA[1,1][1]):(checkd[nrow(checkd),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+      #右端の最小値から，その次の分布の最大値までが重なっている領域
+      check_range <- (checkd[1,1][1]):(compB[nrow(compB),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      
+      frame <- data.frame(level=(check_range%>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compB[,1]){
+           frame[j,2] <- compB[which(compB$level==frame[j,1]),2]
+        }
+      }
+      compB <- frame
+      
+      #オーバーラップしたやつをカウント
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compB[compB$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compB[compB$level==j,2])){
+          counted <- append(counted, compB[compB$level==j,2])
+        }
+      }
+    }
+    all_count<- append(all_count,sum(counted))
+  }
+   ns <- length(all_count)
+    multi_list[[k]] <- data.frame(parce = (all_count/sample_n) %>% rev(),
+                                  prob = unique(plt_list$bias), beat = rep(beat_vec[k],ns))
+  }
+  do.call(rbind,multi_list)
+}
+
+new_multiple_overlap_counter <- function(data, sample_n){
+  multi_list <- list()
+  beat_vec <- unique(data$real)
+  
+  for(k in 1:length(beat_vec)){
+    plt_list <- subset(data,data$real == beat_vec[k])
+    plt_list <- plt_list[,-2]
+    colnames(plt_list) <- c("Acc","bias")
+    
+  p<-plt_list %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+   geom_histogram(position = "identity",alpha=.75,bins=50)+geom_vline(xintercept =slis, col = "red")+labs(fill="Bias")+xlab("Score")+ylab("Count")
+
+  pd <- ggplot_build(p)[["data"]][[1]] %>% select(fill,count,x)
+  #一番左側にくる色を検索
+  pd <-pd %>% pivot_wider(names_from = "fill", values_from = "count")
+  colnames(pd)<-c("level","A","B","C","D")
+
+  pd$level <- 1:nrow(pd)
+  #探索レンジを探す
+  expd <- ncol(pd)-1
+  all_count<-c()
+  for(i in 1:expd){
+    if(i == 1){
+     checkd<-pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+
+      #ひとつ後との比較用
+      compA <- pd[,c(1,i+2)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      #右端の最小値から，その次の分布の最大値までが重なっている領域
+      check_range <- (compA[1,1][1]):(checkd[nrow(checkd),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range%>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+    }
+    else if(i == expd){
+      #最後は左端に来てるやつ
+      checkd <- pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      
+      #ひとつ前との比較用
+      compA <- pd[,c(1,i)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      #その次の分布の最小値から，左端の最大値までが重なっている領域
+      check_range <- (checkd[1,1][1]):(compA[nrow(compA),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+    }
+    else{
+      #最後は左端に来てるやつ
+      checkd<-pd[,c(1,i+1)]
+      checkd <- checkd[checkd[,2]>0,] %>% as.data.frame()
+      
+      #ひとつ前との比較用
+      compA <- pd[,c(1,i)]
+      compA <- compA[compA[,2]>0,] %>% as.data.frame()
+      
+      #ひとつ後との比較用
+      compB <- pd[,c(1,i+2)]
+      compB <- compB[compB[,2]>0,] %>% as.data.frame()
+      
+      #その次の分布の最小値から，左端の最大値までが重なっている領域
+      check_range <- (checkd[1,1][1]):(compA[nrow(compA),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compA[,1]){
+           frame[j,2] <- compA[which(compA$level==frame[j,1]),2]
+        }
+      }
+      compA <- frame
+      
+      #オーバーラップしたやつをカウント
+      counted <- c()
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compA[compA$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compA[compA$level==j,2])){
+          counted <- append(counted, compA[compA$level==j,2])
+        }
+      }
+      #右端の最小値から，その次の分布の最大値までが重なっている領域
+      check_range <- (compB[1,1][1]):(checkd[nrow(checkd),1])
+      
+      frame <- data.frame(level=(check_range %>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% checkd[,1]){
+           frame[j,2] <- checkd[which(checkd$level==frame[j,1]),2]
+        }
+      }
+      checkd <- frame
+      
+      
+      frame <- data.frame(level=(check_range%>% min):(check_range %>% max),
+                          B = rep(0,length((check_range %>% min):(check_range %>% max))))
+      for(j in 1:nrow(frame)){
+        if(frame[j,1] %in% compB[,1]){
+           frame[j,2] <- compB[which(compB$level==frame[j,1]),2]
+        }
+      }
+      compB <- frame
+      
+      #オーバーラップしたやつをカウント
+      for(j in check_range){
+        if(checkd[checkd$level==j,2] < compB[compB$level==j,2]){
+          counted <- append(counted, checkd[checkd$level==j,2])
+        }else if((checkd[checkd$level==j,2] >= compB[compB$level==j,2])){
+          counted <- append(counted, compB[compB$level==j,2])
+        }
+      }
+    }
+    all_count<- append(all_count,sum(counted))
+  }
+   ns <- length(all_count)
+    multi_list[[k]] <- data.frame(parce = (all_count/sample_n) %>% rev(),
+                                  prob = unique(plt_list$bias), beat = rep(beat_vec[k],ns))
+  }
+  do.call(rbind,multi_list)
+}
+
+calc_t_val <- function(n, diff, time, trial){
+  t_list <- list()
+  dif_list <- list()
+
+  for(j in 1:10){
+   #data_sample 一様分布の方がいいかも
+   x <- rnorm(n,.5,.2)
+   y <- rnorm(n,.5 + diff,.2)
+
+  real_t <- t.test(x,y)$statistic
+  
+  #xの値を使って，データサンプル
+  #引数は：心拍数，サンプル数，SD，Bias,   トライアル
+  mlsx <- list()
+  mlsy <- list()
+  for(i in 1:n){
+  lisx <- comp_est_means_normal(time, 1, 8,x[i],trial)
+  mlsx[[i]] <- 1 - (lisx[1:(trial/2)] %>% unlist() %>% mean())
+  }
+  for(i in 1:n){
+  lisy <- comp_est_means_normal(time, 1, 8,y[i],trial)
+  mlsy[[i]] <- 1 - (lisy[1:(trial/2)] %>% unlist() %>% mean())
+  }
+  d <- cbind(newx=unlist(mlsx),newy=unlist(mlsy)) %>% as.data.frame()
+
+  t_list[[j]] <- abs(real_t) - abs(t.test(d$newx,d$newy)$statistic)
+  dif_list[[j]] <- diff - abs(t.test(d$newx,d$newy)$estimate[2] - t.test(d$newx,d$newy)$estimate[1])
+  }
+  td <- unlist(t_list)
+  dd <- unlist(dif_list)
+  
+  c(td %>% abs() %>% mean,dd %>% abs() %>% mean)
+}
+
+calc_r_max <- function(n, r, time, trial){
+  r_list <- list()
+
+  for(j in 1:10){
+   #data_sample 一様分布の方がいいかも
+   x <- rnorm(n,.5,.2)
+   z <- rnorm(n,.5,.2)
+
+    #このxの値がbias，真の値と相関をもつ値を生成
+   y <- r * x + sqrt(1-r^2)*z
+
+  real_r <- cor(x,y)
+  #xの値を使って，データサンプル
+  #引数は：心拍数，サンプル数，SD，Bias,   トライアル
+  mls <- list()
+  for(i in 1:n){
+  lis <- comp_est_means_normal(time, 1, 8,x[i],trial)
+  mls[[i]] <- 1 - (lis[1:(trial/2)] %>% unlist() %>% mean())
+}
+  d <- cbind(new=unlist(mls),x,y) %>% as.data.frame()
+
+  r_list[[j]] <- real_r - (cor(d$new,d$y))
+}
+  unlist(r_list) %>% abs() %>% mean
+
+}
+
+calc_test_retest <- function(n, time, trial){
+  r_list <- list()
+
+  for(j in 1:30){
+   #data_sample 一様分布の方がいいかも
+   x <- rnorm(n,.5,.2)
+   
+  #xの値を使って，データサンプル
+  #引数は：心拍数，サンプル数，SD，Bias,   トライアル
+  mlsa <- list()
+  mlsb <- list()
+  
+  for(i in 1:n){
+  lisa <- comp_est_means_normal(time, 1, 8,x[i],trial)
+  mlsa[[i]] <- 1 - (lisa[1:(trial/2)] %>% unlist() %>% mean())
+  
+  lisb <- comp_est_means_normal(time, 1, 8,x[i],trial)
+  mlsb[[i]] <- 1 - (lisb[1:(trial/2)] %>% unlist() %>% mean())
+}
+  d <- cbind(newa=unlist(mlsa),newb=unlist(mlsb)) %>% as.data.frame()
+  res <- ICC(d)
+  r_list[[j]] <- res$results[3,2]
+}
+  unlist(r_list) %>% abs() %>% mean
+}
+```
+
+# 導入 {.tabset}
+
+心理学研究では，個人の特性/状態を評価するような，様々な指標を用いることで，人間の認知機能を明らかにしていく。\
+そのため，このような評価指標は，道具として用いられるものであり，その信頼性や妥当性について，それぞれの領域において多くの議論，実験が行われている。
+
+個人の内受容感覚を測定するための手法である，心拍検出課題においても同様であり，近年その信頼性と妥当性が大きな議論を呼んでいる。
+
+多くの研究により用いられてきた指標であること，その他の指標と比較し，概念的理解のしやすさ，データ取得の簡便さなどから，今後も多くの研究で活用されると考えられる。
+
+心拍検出課題についての，指標としての信頼性/妥当性に関する議論の中で，研究間での手続きの不一致が指摘されている。\
+この一因として，適切なパラメータの検討が十分になされていない状態で，使用頻度が高まったことが考えられ，現状の実験事態での推定精度，理論的な妥当性を見直す必要性につながる。
+
+そこで，本研究では，課題設定や，算出される指標の信頼性を，数値計算を通して評価する。\
+実際に想定されるパラメータを操作して実験を行うのではなく，シミュレーションを通して検討することは，複数の利点がある。
+
+実験の詳細なパラメータを操作した実験を行う場合（e.g.
+課題条件として設定する時間，試行回数など），大量の実験時間，および実験回数が必要となり，コストも膨大である。\
+シミュレーションを通じたパラメータの探索は，このような手続きを踏む必要が一部削減され，背景の概念から想定される部分のみではあるが，具体的に必要な試行数の情報などを提供することができるため，可能性の低いパラメータを事前に除外することができる。
+
+また，実際にどのような過程を想定するかという営みを通じて，心拍数の報告や，実際に測定された心拍数，算出される指標が，どうあるべきなのか，それを正確に反映できているのかを改めて考え直す契機となる。
+
+そのため，本研究では，現在提案されている問題のうち，数値計算が行える部分について，実際に算出することで探索する。特に，以下の点について取り上げる
+
+1.  心拍検出課題の成績算出手法の比較
+
+2.  心拍検出課題における心拍数，トライアル数の成績分布への影響
+
+3.  心拍検出課題における，心拍数と成績の負の相関関係に関する探索
+
+4.  interoceptive awarenessの算出手法
+
+本研究における検討は，心拍検出課題の課題構造（心拍を数えさせること，複数秒間行った平均を指標とすることなど）に対しての妥当性については言及しない。
+
+## 1. 心拍検出課題の成績算出手法の比較
+
+### 背景
+
+心拍検出課題には，複数の成績算出手法が提案されている。\
+しかし，いずれの手法を用いるのかに関しては，手法間による成績算出の差異が直接比較されていないため，定まっていない。\
+
+特定のグループのみ使用する手法というのは，研究間での結果の一義的な解釈を損ねること，結果の再現性に影響があることから，好ましくない。
+
+そのため，それぞれの手法が持つ性質を，仮想データを用いて提示することで，今後の方針をたてるための根拠とする。
+
+この過程においては，仮想/実データであるということは意味を持たず，生成された結果は直接その指標の性質として解釈することができる。
+
+まず，実際の心拍を60回とし，得られた報告が1-120で変化する際に，それぞれの算出手法では，どのように結果が異なるのかを示す。
+
+### 方法
+
+#### 使用データ
+
+実際の心拍数：60回
+
+```{r, echo=FALSE}
+real<-rep(60,120)
+plot(real,type="l", main = "実際の心拍")
+
+```
+
+報告：1-120回の間で1ずつ増加
+
+```{r, echo=FALSE}
+reported<-c(1:120)
+plot(reported,type="l", main = "得られた報告")
+
+```
+
+#### 使用する数式
+
+〇新しい手法の数式(Garfinkel., 2016)\
+　差分の絶対値を，和の半分で割ったものを1から引く
+
+$$
+1-\frac{|real-reported|}{(real+reported)/2}
+$$
+
+〇Legrand 2022の式
+
+$$
+1-\frac{real-reported}{(real-reported)/2}
+$$
+
+〇従来手法の数式\
+　単純に比率
+
+$$
+\frac{|real-reported|}{real} × 100
+$$
+
+### 結果
+
+Under_Estimateは負の値を取っているが，同じ数値分誤ったOverでは，重みづけが働き，成績の低下が非常に少ない。\
+特に，新しい手法では，成績の取りうる範囲が，0以下をとる可能性のある一方で，overはその限りでない。
+
+leglandは論外，恐らく誤植
+
+```{r, echo=FALSE}
+scores_a<-1-(abs(real-reported)/((real+reported)/2))
+scores_b<-1-(real-reported/((real-reported)/2))
+o_scores <-(abs(real-reported)/real) *100
+plot(scores_b,type="l", main = "legrand")  
+plot(scores_a,type="l", main = "Garfinkel")  
+plot(o_scores,type="l", main = "old")  
+```
+
+従来はerror rateとして算出していたので，1-ErrorRateとして調整\
+赤：新手法　黒：従来
+
+```{r, echo=FALSE}
+o_scores_abs_1 <-1 - abs(((real-reported)/real))
+par(cex=2)
+plot(scores_a,type="l",col=2,ylim=c(-1.0,1.0))  
+par(new=T)
+plot(o_scores_abs_1,type="l", main = "値の比較",ylim=c(-1.0,1.0), ann=F)  
+
+real<-rep(30,120)
+reported<-c(1:120)
+
+o_scores_abs_1 <-1 - abs(((real-reported)/real))
+scores_a<-1-(abs(real-reported)/((real+reported)/2))
+plot(scores_a,type="l",col=2,ylim=c(-1.0,1.0))  
+par(new=T)
+plot(o_scores_abs_1,type="l", main = "値の比較",ylim=c(-1.0,1.0), ann=F)  
+
+real<-rep(90,120)
+reported<-c(1:120)
+
+o_scores_abs_1 <-1 - abs(((real-reported)/real))
+scores_a<-1-(abs(real-reported)/((real+reported)/2))
+plot(scores_a,type="l",col=2,ylim=c(-1.0,1.0))  
+par(new=T)
+plot(o_scores_abs_1,type="l", main = "値の比較",ylim=c(-1.0,1.0), ann=F)  
+```
+
+### 考察
+
+以上のシミュレーションより，従来手法と比較し，新版の手法では，高群に置ける過小評価，低群における過大評価が見受けられる。\
+Zamariola et al.,
+2018において指摘されているように，過大と過小の評価が同一であるということを問題視したうえでの発想のように思う。\
+現象学的に過小評価する人が多い（当然）ので，後述するように，過小評価に対して重みづけをすることで課題の分類精度を向上させることはメリットであると考えられる。
+
+過大評価する個人は非常に少ないことも考慮し，過大評価は基本的には問題ないとしているように思う。
+
+#### ではどんな指標が適切であるのか。
+
+過大評価をする場合に，過小評価と性質が異なるため，異なる処理をする必要があるということは理解できる。\
+しかし，実際に得点にした場合に，過大評価と過小評価したとしても，同一のスコアをとる可能性が考えられる。\
+
+検出したい精度の低下状態としては， 1. 過小評価 2. 過大評価 3.
+評価のばらつき
+
+それぞれの指標として算出する？
+
+#### 分散の観点からの比較
+
+以下で詳細な式変形を行うが，成績算出の式を変形すると，従来指標ではsdが分子にのみあらわれる一方で，garfinkelの指標（＝新しい指標）では，sdが分母にもあらわれる。\
+そのため，従来指標と比較して，ばらつきが大きい場合に，成績が過大評価される傾向にある可能性がある。
+
+そこで，上述のような単純なシミュレーションではなく，想定される成績や，ばらつきを考慮した上でのシミュレーションで行う。
+
+横軸に成績，色にばらつきを取っている。\
+左のパネルに従来指標，右のパネルに新しい指標での算出を提示している。
+
+検出確率は10%，50%，90%，実際の心拍数は，25秒，35秒，45秒条件のそれぞれで，60BPMであった場合とする。
+
+この部分以外の今後の多くのパートでは，成績をErrorRateで表現している（高いほど精度が低い）。\
+しかし，新しい手法は，精度を表す式であるため，oldの手法も，算出された値を1から引いて，成績の指標に変化して提示している。
+
+しかし，今回は1から引いた，成績を算出しているため，
+やや見にくい状態になっている（図示方法考え中）が，下記の図のように，新しい指標の方が，分散が大きく，取りうる値の範囲が広くなることがわかる。\
+
+加えて，bpmが高い場合，すなわち心拍のサンプリング数が多い場合を想定したとしても，new指標の方は，低群の得点の分布が急峻にならず，試行時間を増やしたとしても，得点の識別が困難となることが考えられる（2.につづく）。
+
+```{r bpm_60, echo=FALSE, warning=FALSE}
+options(dplyr.summarise.inform = FALSE)
+plt_lista <- list()
+plt_listb <- list()
+plbi_lista <- list()
+plbi_listb <- list()
+old_list <- list()
+new_list <- list()
+
+sd_vec <- seq(1,10,2)
+bias <- c(.1,.5,.9)
+condition <- c(25,25,35,35,45,45)
+
+for(i in 1:length(sd_vec)){
+  for(k in 1:length(bias)){
+  for (j in 1:250){
+  nl <- compare_met(condition, sd_vec[i], bias[k]) %>% as.data.frame()
+  colnames(nl) <- c("group", "data")
+  nl$data <- nl$data %>% as.numeric()
+  nls <- nl %>% group_by(group) %>% summarise(means = mean(data))
+  plt_lista[[j]] <- data.frame(Acc=nls[nls$group=="new",2] ,error =sd_vec[i])
+  plt_listb[[j]] <- data.frame(Acc=nls[nls$group=="old",2] ,error =sd_vec[i])
+  }
+  plbi_listb[[k]]  <- cbind(bias= bias[k] %>% as.factor() , do.call(rbind,plt_listb))
+  plbi_lista[[k]]  <- cbind(bias = bias[k]%>% as.factor() , do.call(rbind,plt_lista))
+  }
+  old_list[[i]] <- do.call(rbind,plbi_listb)
+  new_list[[i]] <- do.call(rbind,plbi_lista)
+}
+
+op<-do.call(rbind, old_list) %>% ggplot(aes(x=means,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=45)+
+  xlim(-1.25,1.25)+
+  ggtitle("old_methods")+ theme(legend.position = "none")+
+   facet_grid(error ~ .)
+
+np<-do.call(rbind, new_list) %>% ggplot(aes(x=means,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=45)+
+  xlim(-1.25,1.25)+
+  ggtitle("new_methods")+ theme(legend.position = "none")+
+   facet_grid(error ~ .)
+```
+
+```{r bpm_120, echo=FALSE, warning=FALSE}
+options(dplyr.summarise.inform = FALSE)
+plt_lista <- list()
+plt_listb <- list()
+plbi_lista <- list()
+plbi_listb <- list()
+old_list <- list()
+new_list <- list()
+
+sd_vec <- seq(1,10,2)
+bias <- c(.1,.5,.9)
+condition <- c(25,25,35,35,45,45)*120/60
+
+for(i in 1:length(sd_vec)){
+  for(k in 1:length(bias)){
+  for (j in 1:250){
+  nl <- compare_met(condition, sd_vec[i], bias[k]) %>% as.data.frame()
+  colnames(nl) <- c("group", "data")
+  nl$data <- nl$data %>% as.numeric()
+  nls <- nl %>% group_by(group) %>% summarise(means = mean(data))
+  plt_lista[[j]] <- data.frame(Acc=nls[nls$group=="new",2] ,error =sd_vec[i])
+  plt_listb[[j]] <- data.frame(Acc=nls[nls$group=="old",2] ,error =sd_vec[i])
+  }
+  plbi_listb[[k]]  <- cbind(bias= bias[k] %>% as.factor() , do.call(rbind,plt_listb))
+  plbi_lista[[k]]  <- cbind(bias = bias[k]%>% as.factor() , do.call(rbind,plt_lista))
+  }
+  old_list[[i]] <- do.call(rbind,plbi_listb)
+  new_list[[i]] <- do.call(rbind,plbi_lista)
+}
+
+fp<-do.call(rbind, old_list) %>% ggplot(aes(x=means,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=45)+
+  xlim(-1.25,1.25)+
+  theme(legend.position = "none")+
+   facet_grid(error ~ .)
+
+gp<-do.call(rbind, new_list) %>% ggplot(aes(x=means,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=45)+
+  xlim(-1.25,1.25)+
+  theme(legend.position = "none")+
+   facet_grid(error ~ .)
+
+gridExtra::grid.arrange(op,np,fp,gp,top="upper = bpm:60, lower = bpm:120")
+
+```
+
+### 簡単に数式を使った比較
+
+xは固定値，errorを操作 biasが1の時は以下の式
+
+$$
+abs(-error) / x \\\\
+abs(-error) / (x + error/2)
+$$
+
+biasの変動も加えて図示 左下から右下にかけて，0-1を.1刻みでbias変化
+
+$$
+|x - (x * bias +error)| / x \\\\
+|x - (x * bias +error)| / (x + error/2)
+$$
+
+```{r, echo=FALSE}
+trans_old <- function(bias,error,x){
+ 1- abs(x - (x * bias +error)) / x 
+}
+
+trans_new <- function(bias,error,x){
+ 1- abs(x - (x * bias +error)) / (x + error/2)
+}
+
+bias <- seq(0,1,0.1)
+plt_list <- list()
+
+for(j in 1:length(bias)){
+  old_d<-c()
+new_d<-c()
+for(i in 1:50){
+  old_d<-append(old_d,trans_old(bias[j],i,35))
+  new_d<-append(new_d,trans_new(bias[j],i,35))
+}
+  plt_list[[j]] <-data.frame(error = 1:50,
+  group = c(rep("old",length(old_d)),rep("new",length(new_d))),
+           score = c(old_d,new_d)) %>% ggplot(aes(x=error,y=score,group=group,col=group))+
+  geom_line()
+}
+
+ grid.arrange(
+   grobs = plt_list
+ )
+
+```
+
+## 2. 心拍カウント課題における心拍数，トライアル数の成績分布への影響
+
+### 背景
+
+心拍カウント課題では，複数の時間間隔を通し，合計6トライアルの成績を平均化し，個人の内受容感覚の正確さとしている。\
+しかし，これまでの研究において，現在のトライアル数が持つデータ精度の検証は未だに行われていない。
+
+そこで，ランダムにサンプリングされるデータを用いて，トライアル数とばらつきの関係性を示すことで検討する。
+
+### 方法
+
+今回は，最も単純なデータ生成過程として，正規分布を仮定する。
+
+正規分布を仮定する場合は，以下の式で示されるように，その個人が持つ平均的なエラー率(=bias)を実際の心拍数にかけわせた値を平均にもつ正規分布から，ランダムに6つの成績がサンプリングされるものとする。
+
+この時，標準偏差は，トライアルごとの，回答のばらつきであると解釈される。
+
+biasの値は，0-1の間で操作される。例えば，0.1で設定される場合，実際に発生した心拍に対して0.1をかけた値を平均とした正規分布から報告をサンプリングするため，大きく過小評価をする個人であるとわかる。
+
+biasの値を，1以上とする場合，あるいは，1近辺にし，SDを大きく設定する場合，過大評価する個人をシミュレーションすることができる。
+
+本研究においては，このような個人と，過小評価をする個人の背景メカニズム等が異なる可能性も考慮し，取り扱わないものとする。
+
+$$
+Reported　～　Normal(real * bias, sd)
+$$
+
+この条件のもと，生成された自己報告を以下に示す。
+条件として，biasは.5，sdは5であるとする。
+
+この設定は，おおよそ半分くらいの心拍を検出できる個人，かつ，毎回の回答に±5ほどのノイズが加わる回答を想定している。
+
+```{r, echo=FALSE, error=TRUE,error=FALSE}
+da <- sim_normal_production(seq(20,80,by=1), 200, 8, .5)
+#responseの情報，心拍の数が増えると，取りうる値の数が増える
+dataa<-cbind(reported = da,real = rep(seq(20,80,by=1),each=200))%>% as.data.frame() 
+dataa%>% 
+  ggplot(aes(x=real,y=reported)) + geom_point()+
+  xlab("Real")+ylab("Reported")+ theme(text = element_text(size = 30))
+```
+
+##### 参考
+
+この横軸において，実際に取得されたデータは，どのあたりに入るのかを示す。
+
+実データから得られるBPMは以下の通りである（目視）。\
+平均：75\
+最低：50\
+最高：100
+
+これを，課題条件で用いられる時間と掛け合わせると，
+
+```{r, echo=FALSE}
+score_sim_table <- data.frame(sec = c("25s","35s","45s"),
+                              BPM_low = c(25 * 50/60, 35 * 50/60, 45 * 50/60),
+                              BPM_mean = c(25 * 75/60, 35 * 75/60, 45 * 75/60),                            BPM_high = c(25 * 100/60, 35 * 100/60, 45 * 100/60 ))
+
+datatable(score_sim_table)
+```
+
+##### \~old ver.\~
+
+まず上記のセッティングにおいて，1トライアル分のデータからold指標を使って成績を算出する。\
+青い線は，検出確率0.5を示している。\
+心拍数が25以下である場合，非常にばらつきが大きいが，40以降である程度収束する傾向にある。\
+しかし，心拍検出課題のうち，25と35の条件はこれ以下であるため，成績にばらつきが含まれる可能性が高い。
+
+また，心拍数が80である場合にも，誤差の範囲が，±.15ほどとなっている。このような分布の範囲が，トライアル数，課題条件に用いる時間の増加によってどこまで減少するのかというところが論点となる。
+
+```{r, echo=FALSE,error=FALSE}
+#成績の計算 old
+new_d <- list()
+for(i in 1:nrow(dataa)){
+  new_d[[i]] <- hbc(dataa[i,2],dataa[i,1])
+}
+cbind(Acc = do.call(rbind,new_d)%>% as.vector,real = rep(seq(20,80,by=1),each=200))%>% as.data.frame() %>% 
+  ggplot(aes(x=real,y=Acc)) + geom_point() + scale_y_continuous(limits=c(0,1.5))+
+  geom_hline(yintercept=0.5,color="blue")+xlab("Real")+ylab("Score")+ theme(text = element_text(size = 30))
+```
+```{r, echo=FALSE, error=TRUE,error=FALSE}
+mns <- 1:15
+dlis <- list()
+for(i in mns){
+  nl <-  est_means_data(45, 100, .5, i)
+  dlis[[i]] <-do.call(cbind,nl) %>% apply(1,mean)
+}
+
+#responseの情報，心拍の数が増えると，取りうる値の数が増える
+dat <-  do.call(cbind,dlis)%>% as.data.frame() 
+colnames(dat) <- 1:15
+dataa<-dat %>% pivot_longer(cols=1:15,
+                     names_to = "trialN",
+                     values_to = "score")
+dataa%>% 
+  ggplot(aes(x=as.numeric(trialN),y=score)) + geom_point()+
+  xlab("trialN")+ylab("Score")+ theme(text = element_text(size = 30))
+```
+
+```{r, echo=FALSE,error=FALSE}
+#成績の計算 old
+new_d <- list()
+for(i in 1:nrow(dataa)){
+  new_d[[i]] <- hbc(dataa[i,2],dataa[i,1])
+}
+cbind(Acc = do.call(rbind,new_d)%>% as.vector,real = rep(seq(20,80,by=1),each=200))%>% as.data.frame() %>% 
+  ggplot(aes(x=real,y=Acc)) + geom_point() + scale_y_continuous(limits=c(0,1.5))+
+  geom_hline(yintercept=0.5,color="blue")+xlab("Real")+ylab("Score")+ theme(text = element_text(size = 30))
+```
+##### \~new ver.\~
+
+次に上記のセッティングにおいて，1トライアル分のデータからnew指標を使って成績を算出する。\
+青い線は，検出確率0.5の時のnew指標における得点（0.33）を示している。\
+心拍数が25以下である場合，非常にばらつきが大きく，得点が低い方に分布が偏っているが，40以降である程度収束する傾向にある。\
+
+また，心拍数が80である場合にも，誤差の範囲が，±.2となっている。\
+これは，上記のold指標における分布よりも大きい。
+
+```{r,echo=FALSE,error=FALSE}
+#成績の計算 new
+new_d <- list()
+for(i in 1:nrow(dataa)){
+  new_d[[i]] <- new_hbc(dataa[i,2],dataa[i,1])
+}
+cbind(Acc = do.call(rbind,new_d)%>% as.vector,real = rep(seq(20,80,by=1),each=200))%>% as.data.frame() %>% 
+  ggplot(aes(x=real,y=Acc,col=real)) + geom_point() + ggtitle("change to score_new")+ scale_y_continuous(limits=c(-1.0,1.0))+geom_hline(yintercept=0.33,color="blue")
+
+```
+
+#### 実際のデータを受けて，その平均sdを適用する\~old ver.\~
+
+実際のデータから算出される成績の標準偏差
+
+![櫻木さんの実験データより](sd_fromreal.jpg)
+
+最頻値，中央値等は6? 平均を取るともう少し高い印象\
+ひとまず，SD = 8として推定を行う
+
+まずold指標について，トライアル数ごと，および検出確率ごとの分布を示す。\
+従来の手法で用いられている，6回分データをサンプリングし，平均化したものを，100人分プロットしている。　
+
+検出確率は色で表現されており，0.2-0.8まで，0.2刻みで4群が含まれている。\
+上述のプロット同様，横軸は心拍数を表す。\
+図中の赤い縦線は，従来条件において，BPM75であった場合に，観測される心拍数。\
+
+下段の図は，上段の図において，分布間の重なり（＝誤識別）を示している。\
+
+```{r, echo=FALSE}
+#定量化して評価
+
+#確率変化させて挙動を見る過程
+plot_list <- list()
+plot_lista <- list()
+slis <- seq(.25,1,.25)
+j <- 6
+for(i in 1:length(slis)){
+nl<-est_means_normal(seq(25,80,by=1), 100, 8,slis[i],j)
+plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),real = rep(seq(25,80,by=1),each=100),bias = rep(slis[i],length(seq(25,80,by=1)*100))) 
+}
+ plot_list[[j]] <- do.call(rbind,plot_lista) %>% 
+  ggplot(aes(x=real,y=Acc,col=bias)) + geom_point(aes(alpha=.5)) +
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+scale_y_continuous(limits=c(0,1.75))
+ #+ theme(legend.position = "none")
+
+p1 <- do.call(rbind,plot_lista) %>% 
+  ggplot(aes(x=real,y=Acc,col=bias)) + geom_point() +
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+scale_y_continuous(limits=c(0,1.0))+theme(axis.title.x = element_blank())+ylab("Score")+labs(col="Bias")+ theme(text = element_text(size = 30))
+ 
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+p2 <- multiple_overlap_counter(a,100) %>% 
+   ggplot(aes(x=beat,y=parce,group=prob,col=prob))+
+   geom_point()+geom_line(stat="identity")+
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+xlab("Real")+
+  ylab("Overlap")+labs(col="Bias")+ 
+  theme(text = element_text(size = 30))
+ 
+
+gridExtra::grid.arrange(p1,p2,nrow=2)
+```
+
+#### 実際のデータを受けて，その平均sdを適用する\~new ver.\~
+
+次にnew指標について，トライアル数ごと，および検出確率ごとの分布を示す。\
+従来の手法で用いられている，6回分データをサンプリングし，平均化したものを，100人分プロットしている。\
+検出確率は色で表現されており，0.2-0.8まで，0.2刻みで4群が含まれている。\
+上述のプロット同様，横軸は心拍数を表す。\
+図中の赤い縦線は，従来条件において，BPM75であった場合に，観測される心拍数。\
+　
+下段の図は，上段の図において，分布間の重なり（＝誤識別）を示している。\
+
+心拍数が少ない（課題時間が短い）場合には，従来のトライアル数である，6回の平均値を用いても，成績が0.2違うということを検出できない可能性が見受けられる。
+
+```{r, echo=FALSE}
+#定量化して評価
+
+#確率変化させて挙動を見る過程
+plot_list <- list()
+plot_lista <- list()
+slis <- seq(.25,1,.25)
+j <- 6
+for(i in 1:length(slis)){
+nl<-est_means_normal_new(seq(25,100,by=1), 100, 8,slis[i],j)
+plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),real = rep(seq(25,100,by=1),each=100),bias = rep(slis[i],length(seq(25,100,by=1)*100))) 
+}
+ plot_list[[j]] <- do.call(rbind,plot_lista) %>% 
+  ggplot(aes(x=real,y=Acc,col=bias)) + geom_point(aes(alpha=.5)) +
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+scale_y_continuous(limits=c(-1,1))
+ #+ theme(legend.position = "none")
+
+p1 <- do.call(rbind,plot_lista) %>% 
+  ggplot(aes(x=real,y=Acc,col=bias)) + geom_point(aes(alpha=.8)) +
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+scale_y_continuous(limits=c(-1,1.0))
+ 
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+p2 <- count_overlap_new(a) %>% 
+   ggplot(aes(x=beat,y=parce,group=prob,col=prob))+
+   geom_point()+geom_line(stat="identity")+
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+ theme(legend.position = "none")
+ 
+
+gridExtra::grid.arrange(p1,p2,nrow=2)
+```
+
+トライアル数が多い条件，つまり，8-9回であれば，非常に少ない心拍数であっても，エラー率が20%ことなることを安定して識別できることが考えられる。\
+一方で，特に内受容の精度が中程度の群などでは，20%よりも狭い区間にたくさんの被験者が含まれるケースが多いことが考えられるため，そのような差は検出できないといってよい。
+
+加えて，複数の群にわける場合であっても，群の境目において，20%成績が異なるというケースはまれであることが想定され，多くの個人が誤った群分けをされることも想定される。
+
+#### 何トライアル行えば，弁別可能となるのか
+
+上述のプロットでは，従来の課題条件では，20%の違いを弁別することができなかった。\
+そこで，6回よりも多くのトライアルを行うことで，分布の収束，識別精度の向上を検討する。\
+
+これまでは，6回のトライアルを用いていたが，各条件において，1回ずつ増やした場合を想定し，9回，および12回の条件を作成し，比較する。
+
+また，3回や4回という，多くの条件よりも少ない試行数で行う研究も考慮し，3回の条件も作成した。
+
+```{r, echo=FALSE}
+#確率変化させて挙動を見る過程
+plot_list <- list()
+plot_lista <- list()
+slis <- seq(.25,1,.25)
+for (j in c(3,9,12)){
+for(i in 1:length(slis)){
+nl<-est_means_normal(seq(25,80,by=1), 100, 8,slis[i],j)
+plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),real = rep(seq(25,80,by=1),each=100),bias = rep(slis[i],length(seq(25,80,by=1)*100))) 
+}
+
+p1 <- do.call(rbind,plot_lista) %>% 
+  ggplot(aes(x=real,y=Acc,col=bias)) + geom_point(aes(alpha=.8)) +
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+ theme(legend.position = "none")
+ 
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+p2 <- count_overlap(a) %>% 
+   ggplot(aes(x=beat,y=parce,group=prob,col=prob))+
+   geom_point()+geom_line(stat="identity")+
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+ theme(legend.position = "none")
+
+plot_list[[j]] <- p1
+plot_list[[j+1]] <- p2
+}
+plot_list[[3]]+plot_list[[9]]+plot_list[[12]]+plot_list[[4]]+plot_list[[10]]+
+  plot_list[[13]]+
+  plot_layout(nrow = 2,ncol=3)
+```
+
+```{r, echo=FALSE}
+#確率変化させて挙動を見る過程
+plot_list <- list()
+plot_lista <- list()
+slis <- seq(.25,1,.25)
+for (j in c(3,9,12)){
+for(i in 1:length(slis)){
+nl<-est_means_normal_new(seq(25,80,by=1), 100, 8,slis[i],j)
+plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),real = rep(seq(25,80,by=1),each=100),bias = rep(slis[i],length(seq(25,80,by=1)*100))) 
+}
+
+p1 <- do.call(rbind,plot_lista) %>% 
+  ggplot(aes(x=real,y=Acc,col=bias)) + geom_point(aes(alpha=.8)) +
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+ theme(legend.position = "none")
+ 
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+p2 <- count_overlap_new(a) %>% 
+   ggplot(aes(x=beat,y=parce,group=prob,col=prob))+
+   geom_point()+geom_line(stat="identity")+
+   geom_vline(xintercept = c(25,35,45)*75/60, col = "red")+ theme(legend.position = "none")
+
+plot_list[[j]] <- p1
+plot_list[[j+1]] <- p2
+}
+plot_list[[3]]+plot_list[[9]]+plot_list[[12]]+plot_list[[4]]+plot_list[[10]]+
+  plot_list[[13]]+
+  plot_layout(nrow = 2,ncol=3)
+```
+
+結果として，12回ほど試行を重ねることで，従来条件のうち，45秒条件かつ，BPM75では，20%の違いを正常に識別できると考えられる。\
+
+また，特筆すべき事項として，従来の計算手法よりも，新しい算出手法を用いた場合のほうが，識別精度が高いことが示されている。
+
+旧来手法では，平均して70回ほどの心拍が得られる課題条件を，9回以上行う必要があること，新手法では，これが60回ほどを9回，あるいは，70回ほどを6回でよいことが読み取れる。
+
+#### 実データを考慮したうえでの分布\~old ver.\~
+
+上述のシミュレーション環境下において，old指標による算出を用いた場合に，従来の条件ではどのように分散が広がる可能性があるのかを以下に示す。
+
+従来条件とはつまり，25，35，45秒をそれぞれ2回ずつ行う条件である。
+
+正答率は，.2から.8までを.2刻みで4群作成している。\
+図中の赤線は，正答率を表しており，正しく評価できていれば，この赤線を中心とする正規分布になる。
+
+```{r, echo=FALSE,error=FALSE}
+#定量化して評価
+
+#確率変化させて挙動を見る過程
+plt_list <- list()
+plt_lista <- list()
+slis <- c(.60, .80)
+condition <- c(25,25,35,35,45,45)*75/60
+sd_from_data <- 8
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+da <- do.call(rbind, plt_list)
+da<-cbind(da,rep("75/60",nrow(da)))
+colnames(da) <- c("Acc", "probs", "real")
+textd <- data.frame(overlaps = overlap_counter(plt_list,500),
+          bias = do.call(rbind, plt_list)$bias %>% unique() %>% rev())
+
+l <- textd$overlaps * 100
+l <- sprintf("%5.1f", l)
+lab <- paste(
+                 ".2　",  ".4　",  ".6　", ".8\n",
+                 "overlap(%):", l[1], " ", l[2], " ", l[3], " ", l[4], sep = ""
+               )
+
+p<-do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=50)+geom_vline(xintercept = 1-slis, col = "red")+labs(fill="Bias")+xlab("Score")+ylab("Count")+ 
+  theme(text = element_text(size = 30))
+pt<-do.call(rbind, plt_list)
+pd <- data.frame(a1 = pt[1:500,1],a2 = pt[501:1000,1])
+t.test(pd$a1,pd$a2)
+p
+lab
+```
+
+上述のシミュレーションでは，概ねreal=60付近のポイントより，分散値の低減が減少していた。\
+そのため，デモンストレーションとして，60,70,80の条件をそれぞれ二回ずつ行った場合の結果を以下に示す。
+
+```{r, echo=FALSE,error=FALSE}
+condition <- c(60,60,70,70,80,80)*75/60
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=45)+geom_vline(xintercept = slis, col = "red")+
+  ggtitle("一回の試行時間を増やした場合の分布")
+```
+
+上記のように，全体のトライアル数を増やすことによって，ご識別確率が著しく減少することが示された。
+
+#### 実データを考慮したうえでの分布\~new ver.\~
+
+上記の条件を，new指標においても行う。
+
+正答率は，.2から.8までを.2刻みで4群作成している。\
+図中の赤線は，各正答率の時のnew指標におけるスコアの値を表しており，正しく評価できていれば，この赤線を中心とする正規分布になる。
+
+```{r, echo=FALSE,error=FALSE}
+#定量化して評価
+
+#確率変化させて挙動を見る過程
+plt_list <- list()
+plt_lista <- list()
+slis <- seq(.2,.8,.2)
+score<-c(new_hbc(100,20),new_hbc(100,40),new_hbc(100,60),new_hbc(100,80))
+condition <- c(25,25,35,35,45,45)*75/60
+sd_from_data <- 8
+
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal_new(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bins=45)+geom_vline(xintercept = score, col = "red")+
+  ggtitle("従来条件における成績の分布")
+```
+
+上述のシミュレーションでは，概ねreal=60付近のポイントより，分散値の低減が減少していた。\
+そのため，デモンストレーションとして，60,70,80の条件をそれぞれ二回ずつ行った場合の結果を以下に示す。
+
+```{r, echo=FALSE,error=FALSE}
+condition <- c(60,60,70,70,80,80)*75/60
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal_new(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity",alpha=.75,bis = 45)+geom_vline(xintercept = score, col = "red")+
+  ggtitle("一回の試行時間を増やした場合の分布")
+```
+
+これらのシミュレーションから，多くの個人，および実験条件において，識別力が非常に低い可能性があり，不安定なデータが取得されていることが考えられる。
+
+最低でも25秒を削減し，45秒条件の実施を増化，あるいは，時間の推測を不可能な条件として，より長い時間を追加で導入する意義があると考えられる。\
+具体的には，60秒以降かつ低い分散値（二項分布を想定する場合は除く），であれば，高い識別力で評価することが可能であるが，課題時間が長大になる可能性がある。
+
+#### 20%の違いは何人分の違いを説明しているのか
+
+old指標で算出した実際のデータより，成績を順番に並べ，平均して20%ほど精度が異なるという場合，どれくらいの順位の差があるのかということを以下に提示する。
+
+横軸に順位の違い，縦軸にエラーレートの差を示す。
+
+結果として，20%の違いは，およそ25名ほどの差分であることが見て取れる。\
+これは，従来の実験条件，算出指標である場合には，順位が25位ことなる個人間差が，識別できない可能性があることを示唆している。
+
+```{r, echo=FALSE}
+grid::grid.raster( tiff::readTIFF( "diff1.tiff") )
+
+```
+
+```{r, echo=FALSE}
+grid::grid.raster( tiff::readTIFF( "diff2.tiff") )
+
+```
+
+```{r, echo=FALSE}
+grid::grid.raster( tiff::readTIFF( "diff3.tiff") )
+```
+
+#### 順位のずれを収めたい場合
+
+では，具体的にどのようなトライアル数であればこのようなばらつきは制限されるのであろうか。\
+これまで行ったシミュレーションにおいて，もっとも値が収束していた，60,70,80秒の条件下で，それぞれの時間条件を増やした際に，どれだけ弁別精度が上がるのかを以下に示す。
+
+##### 20%刻みで提示していた分布を，10%刻みに変更する場合\~old ver.\~
+
+```{r, echo=FALSE,error=FALSE}
+slis <- seq(.3,.7,.1)
+condition <- c(60,60,60,70,70,70,80,80,80)
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity", alpha=.75)+geom_vline(xintercept = slis, col = "red")+
+  ggtitle("長い試行時間かつ，試行数を1回ずつ増やす/成績を10%刻み")
+```
+
+##### 20%刻みで提示していた分布を，10%刻みに変更する場合\~new ver.\~
+
+```{r, echo=FALSE,error=FALSE}
+slis <- seq(.3,.7,.1)
+score<-c(new_hbc(100,30),new_hbc(100,40),new_hbc(100,50),
+         new_hbc(100,60),new_hbc(100,70))
+condition <- c(60,60,60,70,70,70,80,80,80)
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal_new(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity", alpha=.75)+geom_vline(xintercept = score, col = "red")+
+  ggtitle("長い試行時間かつ，試行数を1回ずつ増やす/成績を10%刻み")
+```
+
+##### 20%刻みで提示していた分布を，5%刻みに変更する場合\~old ver.\~
+
+```{r, echo=FALSE,error=FALSE}
+slis <- seq(.4,.6,.05)
+condition <- c(60,60,60,60,60, 80,80,80,80,80, 100,100, 100,100,100)
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity", alpha=.75)+geom_vline(xintercept = slis, col = "red")+
+  ggtitle("長い試行時間かつ，試行数を3回ずつ増やす/成績を5%刻み")
+```
+
+##### 20%刻みで提示していた分布を，5%刻みに変更する場合\~new ver.\~
+
+```{r, echo=FALSE,error=FALSE}
+slis <- seq(.4,.6,.05)
+condition <- c(60,60,60,60,60, 80,80,80,80,80, 100,100, 100,100,100)
+score<-c(new_hbc(100,40),new_hbc(100,45),
+         new_hbc(100,50),new_hbc(100,55),new_hbc(100,60))
+
+for(i in 1:length(slis)){
+  for (j in 1:500){
+  nl <- means_somet_normal_new(condition, sd_from_data, slis[i])
+  plt_lista[[j]] <- data.frame(Acc=do.call(cbind,nl) %>% apply(1,mean),bias =slis[i])
+}
+  plt_list[[i]] <- do.call(rbind,plt_lista)
+
+}
+
+do.call(rbind, plt_list) %>% ggplot(aes(x=Acc,group=bias,fill=bias))+
+  geom_histogram(position = "identity", alpha=.75)+geom_vline(xintercept = score, col = "red")+
+  ggtitle("長い試行時間かつ，試行数を3回ずつ増やす/成績を5%刻み")
+```
+
+60,70,80の試行時間条件を1回ずつ増やすことで，10%ほどの違いを検出できることがわかる。\
+しかし，その後3回増やした場合では，5%の違いをギリギリ検出できるほどであるとみられることから，試行時間の増化は，徐々に効果が低下していくことが示唆される。
+
+ちなみに，60-80条件×3回は，630秒なので，10.5分
+×5回は，1050秒なので，17.5分ということから，推奨としては，現段階では60,70,80の試行時間の条件を1回ずつ増化した条件である。\
+しかし，長いトライアル数は，他のタスクとの兼ね合いや，被験者の疲労や集中力の影響，練習効果など様々な影響が考えられるため，最小点を考えたい。
+
+#### オーバーラップと総時間の関係をプロット
+
+20%,10%を基準として，新条件，旧条件において，心拍の数と，トライアルの増加により，オーバーラップがどのように減少するのか，また，その際にかかる時間の関係をプロットする。
+
+横軸に心拍の数を5拍刻みで，20から80拍まで，縦軸にトライアル数を1から20までプロットする。
+
+色はオーバーラップの割合平均を示しており，0であれば完全に弁別可能であると考えられる。
+
+右側の行列では，それぞれの条件が必要とする課題時間を示している。
+
+```{r, echo=FALSE}
+#確率変化させて挙動を見る過程
+plot_list1 <- list()
+plot_lista <- list()
+plot_list2 <- list()
+plot_listb <- list()
+slis <- seq(.25,.85,.20)
+for (j in 1:15){
+  for(i in 1:length(slis)){
+    nl<-comp_est_means_normal(seq(30,120,by=1), 100, 8,slis[i],j)
+    nls<-nl[1:j]
+    plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nls) %>% apply(1,mean),real =                                 rep(seq(30,120,by=1),each=100),bias =                                 rep(slis[i],length(seq(30,120,by=1)*100))) 
+  
+    nls<-nl[(j+1):(j*2)]
+    plot_listb[[i]] <- data.frame(Acc=do.call(cbind,nls) %>% apply(1,mean),real =                         rep(seq(30,120,by=1),each=100),bias =                         rep(slis[i],length(seq(30,120,by=1)*100))) 
+}
+
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+b <- multiple_overlap_counter(a,100)
+b <- cbind(b,trialN = rep(j,nrow(b)))
+
+plot_list1[[j]] <- b
+
+a <- do.call(rbind,plot_listb)
+colnames(a) <- c("Acc", "real", "probs")
+
+b <- new_multiple_overlap_counter(a,100)
+b <- cbind(b,trialN = rep(j,nrow(b)))
+
+plot_list2[[j]] <- b
+}
+data <- do.call(rbind,plot_list1) 
+data$parce[data$parce>=1] <-1
+pd <- data %>% group_by(beat,trialN) %>% summarise(mean=mean(parce))
+
+data <- do.call(rbind,plot_list2) 
+data$parce[data$parce>=1] <-1
+pd1 <- data %>% group_by(beat,trialN) %>% summarise(mean=mean(parce))
+
+firstd1 <- pick_first_zero(pd, 0.05)
+p1 <-  pd %>% ggplot(aes(x=beat,y=trialN,fill=mean))+geom_tile()+
+  scale_y_reverse()+
+  scale_x_continuous(breaks = seq(30, 80, by = 5)) + 
+  geom_tile(data = firstd1, fill = NA, color = "#FBD87F",linewidth=1.5)+
+  theme(legend.justification = c(1,0),
+        legend.position = c(1,0),
+        legend.key.size = unit(.25, 'cm'))+ 
+        theme(text = element_text(size = 30))+ guides(fill = FALSE)+xlab("Real")
+
+#確率変化させて挙動を見る過程
+plot_list1 <- list()
+plot_lista <- list()
+plot_list2 <- list()
+plot_listb <- list()
+slis <- seq(.30,.60,.10)
+trialN <- 20:50
+for (j in 1:length(trialN)){
+  for(i in 1:length(slis)){
+    nl<-comp_est_means_normal(seq(30,120,by=1), 100, 8,slis[i],j)
+    nls<-nl[1:j]
+    plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nls) %>% apply(1,mean),real =                                 rep(seq(30,120,by=1),each=100),bias =                                 rep(slis[i],length(seq(30,120,by=1)*100))) 
+  
+    nls<-nl[(j+1):(j*2)]
+    plot_listb[[i]] <- data.frame(Acc=do.call(cbind,nls) %>% apply(1,mean),real =                         rep(seq(30,120,by=1),each=100),bias =                         rep(slis[i],length(seq(30,120,by=1)*100))) 
+}
+
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+b <- multiple_overlap_counter(a,100)
+b <- cbind(b,trialN = rep(trialN[j],nrow(b)))
+
+plot_list1[[j]] <- b
+
+a <- do.call(rbind,plot_listb)
+colnames(a) <- c("Acc", "real", "probs")
+
+b <- new_multiple_overlap_counter(a,100)
+b <- cbind(b,trialN = rep(trialN[j],nrow(b)))
+
+plot_list2[[j]] <- b
+}
+data <- do.call(rbind,plot_list1) 
+data$parce[data$parce>=1] <-1
+pdb <- data %>% group_by(beat,trialN) %>% summarise(mean=mean(parce))
+
+firstd <- pick_first_zero(pdb, 0.05)
+p3 <-  pdb %>% ggplot(aes(x=beat,y=trialN,fill=mean))+geom_tile()+
+  scale_y_reverse()+
+  scale_x_continuous(breaks = seq(30, 80, by = 5)) + 
+  geom_tile(data = firstd, fill = NA, color = "#FBD87F",linewidth=1.5)+
+  theme(legend.justification = c(1,0),
+        legend.position = c(1,0))+
+  theme(legend.key.size = unit(.25, 'cm'))+ 
+        theme(text = element_text(size = 30))+ guides(fill = FALSE)+xlab("Real")+ylab("")
+
+p1 | p3
+
+```
+
+##### 参考として，oldとnewのオーバーラップ率を算出
+
+```{r, echo=FALSE}
+pn1 <- data.frame(pd[,c(1,2)],
+diff = pd$mean-pd1$mean
+)%>% ggplot(aes(x=beat,y=trialN,fill=diff))+geom_tile(col="black")+theme_bw()+
+  scale_y_reverse()+
+  scale_x_continuous(breaks = seq(25, 80, by = 5))+
+  theme(legend.justification = c(1,0),
+        legend.position = c(1,0))+ggtitle("Difference (old - new)")+
+  theme(legend.key.size = unit(.25, 'cm'))+
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "#FFFFFF",
+                       high = "#FF0000",
+                        midpoint = 0) + 
+        theme(text = element_text(size = 32))
+pn2 <- data.frame(pd[,c(1,2)],
+diff = pd$mean-pd1$mean
+) %>% group_by(trialN) %>% summarise(mean=sum(diff))%>% ggplot(aes(x=1,y=trialN,fill=mean))+
+  geom_tile(col="black")+theme_bw()+
+  scale_y_reverse()+
+  theme(legend.justification = c(1,0),
+        legend.position = c(1,0))+ggtitle("Difference (old - new)")+
+  theme(legend.key.size = unit(.25, 'cm'))+
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "#FFFFFF",
+                       high = "#FF0000") + labs(title="sum of diff")+
+     theme(axis.title.x = element_blank(), axis.title.y = element_blank())+ 
+        theme(text = element_text(size = 32))
+countd <- data.frame(pd[,c(1,2)],
+diff = pd$mean-pd1$mean
+) 
+data.frame(old = sum(countd$diff<0), new = (sum(countd$diff>0)))
+sum(countd$diff<0)
+
+(pn1 | pn2) + 
+  plot_layout(widths = c(5, 1))
+```
+
+```{r, echo=FALSE}
+#確率変化させて挙動を見る過程
+plot_list1 <- list()
+plot_lista <- list()
+plot_list2 <- list()
+plot_listb <- list()
+slis <- seq(.25,.85,.20)
+for (j in 1:15){
+  for(i in 1:length(slis)){
+    pr <- rnorm(1,.50,.3)
+    nl <- comp_est_means_normal(60, 50, 8, pr,9)
+    nls<-nl[1:9]
+    dataa <- do.call(cbind,nls) %>% apply(1,mean)
+    
+    nl <- comp_est_means_normal(60, 50, 8, pr,9)
+    nls<-nl[1:9]
+    datab <- do.call(cbind,nls) %>% apply(1,mean)
+    
+    cor(dataa,datab)
+    
+    plot_lista[[i]] <- data.frame(Acc=do.call(cbind,nls) %>% apply(1,mean),real =                                 rep(60,each=100),bias = rep(.5,100))
+}
+
+a <- do.call(rbind,plot_lista)
+colnames(a) <- c("Acc", "real", "probs")
+
+b <- count_overlap(a)
+b <- cbind(b,trialN = rep(j,nrow(b)))
+
+plot_list1[[j]] <- b
+
+
+a <- do.call(rbind,plot_listb)
+colnames(a) <- c("Acc", "real", "probs")
+
+b <- count_overlap_new(a)
+b <- cbind(b,trialN = rep(j,nrow(b)))
+
+plot_list2[[j]] <- b
+}
+
+```
+
+## 3. 心拍カウント課題における，心拍数と成績の相関関係に関する探索
+
+上記のように，心拍数や，トライアル数によって，成績の安定度が異なることが示された。\
+心拍数が少ない場合には，非常にばらつきが大きく，多い場合には少ない。\
+このような状況においては，心拍数が少ないデータにおいてのランダム性が，心拍数と成績の間の相関を創発する可能性が考えられる。
+
+### 相関に関する議論 {.tabset}
+
+#### 全体の流れ
+
+```{r, echo=FALSE}
+DiagrammeR::grViz("digraph {
+  graph [layout = dot, rankdir = TB]
+  
+  node [shape = rectangle]        
+  rec1 [label = 'Zamariola 
+  Scoreと実際の心拍に相関がある！']
+  rec2 [label = 'Zimprich 
+  相関分析の数理過程から問題なし']
+  rec3 [label = 'Ainly 
+  内受容の指標なので構造が入り込むのは問題なし']
+  rec4 [label = 'Corneille
+  上記を一部認めつつ，問題点を指摘']
+  
+  # ノードIDでエッジを定義
+  rec1 -> rec2;
+  rec1 -> rec3;
+  rec2 -> rec4;
+  rec3 -> rec4;
+  }",
+  height = 500)
+```
+
+#### Zamariolaの最初の主張
+
+※Zamariolaの研究を意識した検討，彼らの研究では，スコアと心拍数の間に負の相関があるとしている。\
+また，N = 564 とかなので，それは有意になるだろうという気もしている（r =
+.1でN = 783）。
+
+この相関関係をもってして，Accuracyのスコアに心臓の構造的な個人差が入り込んでいるため，スコアがゆがんでいることを指摘。
+
+![Zamariola et al., 2018より](zamariola.jpg)
+
+実際に，櫻木さんのデータセットにおいても逆の傾向ではあるが，相関が見られている。
+
+```{r, echo=FALSE}
+grid::grid.raster( tiff::readTIFF( "HBC_scoreandhr.tiff") )
+
+```
+
+#### Zimprichの主張
+
+Zamariolaは，負の相関があることをもってして，Accuracyが，心臓の構造的側面と結びついているとしている。\
+しかし，この負の相関は，比率変数を用いたことによる偽相関である可能性が高い(Pearson,
+1987)。
+
+※図中a, b, cは独立
+
+```{r, echo=FALSE}
+DiagrammeR::grViz("digraph {
+   graph [layout = dot,
+         rankdir = TB,
+         overlap = true,
+         fontsize = 10]
+  
+  # nodes
+  #######
+  node [shape = circle,           # shape = circle
+       fixedsize = true
+       width = 1.3]               # width of circles
+  
+  a [label = 'a']                        # names of nodes
+  b [label = 'b']
+  avsc [label = 'a/c']
+  bvsc [label = 'b/c']
+  onevsc [label = '1/c']
+  
+
+  # edges
+  #######
+  edge[]
+  {rank = same;avsc;bvsc}
+  {rank = min;onevsc}
+  {rank = max;a;b}
+  a   -> avsc 
+  b -> bvsc 
+ onevsc -> avsc 
+ onevsc -> bvsc
+ avsc -> bvsc  [label='   相関']
+ bvsc -> avsc
+  }")
+```
+
+c = 報告された心拍数， a = 実際の心拍とすると，Accuracy = c/a とa
+の相関は（Zamariolaの示した相関），
+
+$$
+r(\frac{c_i}{a_i},a_i) =\frac{r(ca) \sqrt{\frac{V(c)}{μ^2_c}}-\sqrt{\frac{V(a)}{μ^2_a}}}{ \sqrt{\frac{V(c)}{μ^2_c}+\frac{V(a)}{μ^2_a}-\frac{2r(ca) \sqrt{V(c)V(a)}}{μ_cμ_a}}}
+$$
+
+で表される。 Schuessler,
+1974から引用したとしているが，そんな式はない（式変形で導出できるか確認中）。　　
+
+上記の式を代入した結果。\
+![Zimprich et al., 2018より](sim_corr.jpg)
+
+縦軸に，AccuracyとActual，横軸に，ActualとCounted(報告数)を出している。　　
+
+以下，このシミュレーションを用いたZimprichの主張　　
+
+1.  ***「カウントされた心拍と実際の心拍の相関が0であっても，AccuracyとActualの間には相関がでる」***
+
+2.  ***「もし，実際とカウントの相関が0ならば，スコアと実際の相関は-.51になる」***
+
+3.  ***「実際の心拍とカウントした心拍の相関が，.56でなければ，AccとActualの相関は0にならない」***
+
+Zamariolaがいっているのは，この対応関係のことであり，これはPearson(1987)が，spurious
+correlationと読んだ典型例だ!
+
+以下感想
+
+1.  そもそも，Zamariolaの主張としては，Accuracy算出過程に，身体構造のデータが入っていること，それによる相関を問題視
+
+2.  この図の横軸は，実際の心拍と報告値の，グループレベルの相関値でしかないため，この値に関してはどのような値をとっても理論上問題はない（グループレベルのAccuracyなので）。
+
+3.  というか，そもそもCountedのデータは，Actualを元に生成しているので，疑似相関以前に，独立でないサンプルの相関を見ている問題がある\
+    →これは大本までたどるとZamariolaの問題でもある
+
+Ainleyとその後のCorneilleの議論の方がよほど意味がある
+
+#### Ainleyの主張 　
+
+$$
+Accuracy = \frac{report}{actual} \\\\
+HeartRate = (\frac{actual}{trial Length} ) * 60 \\\\
+actual = HeartRate * \frac{trialLength}{60}
+$$
+
+となる。この条件で，最後の式の右辺において，HR以外をkと置くと，
+
+$$
+actual = k * HeartRate
+$$
+
+となる。kは，課題時間と60でできているので，参加者間で一定のため，固定値として扱える。
+
+このことから，最終的に成績は，
+
+$$
+Accuracy = \frac{report}{k * HeartRate}
+$$
+
+となる。
+
+以下主張
+
+1.  ***これは，比率変数に対する相関の観点から，A = X/kY,
+    で，AとYは負の相関が，出やすいということがわかっているので問題ない。***
+
+2.  ***Zamariolaは，人々の内受容精度を測る上で，その構造状態に制約を受けてはいけないとしている。\
+    しかし，どのようなモダリティであっても，内受容精度の評価タスクは，調査対象の器官系の生理学に常に依存している\
+    →そのため，このような負の相関は，むしろテストが生理的基盤に基づいていることを意味しているため妥当***
+
+以下感想
+
+1.  A = X/kYは，なぜ問題ないのか全く明らかでない
+
+2.  評価尺度の算出に構造が含まれることから，関連があることは疑似相関といっていたのに，負の相関がでるのは妥当としている，これはなぜか
+
+3.  精度に構造的情報が入り込むことと，精度と構造が関連することは別問題
+
+ここら辺は一部Corneilleの主張で解消される。\
+しかし，reportの方にactualが影響する可能性については，取り扱われていない。\
+また，以後の僕のシミュレーションでもわかる通り，このA =
+X/kYは普通に問題がある。
+
+#### Corneilleの主張
+
+1.  ***上記の指摘のうち，比率変数が疑似相関をもたらすかは，先行研究で意見が分かれる（実は結構否定される）***
+
+2.  ***数学的に制約を受けても，一般的事実として，スコアが高い人は，拍動が遅いなどの知見がある***
+
+3.  ***Ainleyは，scoreが心臓状態に依存するのが好ましいとしているが，それはそうなんだが，精度算出に入るのは違う***
+
+***e.g.)　視覚の正確さを測定するために，個人によって，観察距離が異なるようなことを意味している***
+
+上記を受けて，そもそもAccuracyが比率変数である以上，なんらかの統計的異常が起きる可能性が高いとして，対策が必要と考えている\
+※この論文が一番意義あるように思える
+
+結果として，心拍が影響してしまっているのは依然問題である一方で，対抗策は考えられていないことが現状
+
+### 今回の目的
+
+上記の議論のうち，対策するべき問題をまとめると，算出手法にBPMが入り込むこと，純粋な手法において，心臓に関連する身体的な構造の影響を検討することの二つに分けられる。
+
+これらの議論を踏まえ，まず，これまで行ってきたシミュレーション環境化での，BPMと精度の相関の把握を行う。\
+そのうえで，その根本要因とその対策を探索する。
+
+### データ生成過程に正規分布が想定される場合
+
+これまでのシミュレーションでは，実際の心拍は固定値として検討していたため（固定のBPMに時間条件をかけ合わせたと仮定），BPMを導入する。
+
+BPMを加味する場合には，課題条件時間に，実データを参考にして設定した正規分布から，BPMを算出し，パーセント化して掛け合わせることで，実際の心拍を表現する。
+
+さらに，Sim2同様，実際の心拍にbiasをかけた値を平均とする正規分布から，ノイズsdを含む報告が得られると仮定する。
+
+biasは精度を表しており，現段階では，おおよそ正答率60%を中心とする正規分布からサンプリングしている。
+
+$$
+reports　～　Normal(real * bias, SD)  \\\\
+bias　～　Normal(0.6, 0.2)  \\\\
+real　=　Time * BPM \\\\
+BPM　～　Normal(75, 10)
+$$
+
+上記の条件より生成されたBPMの分布と，実際のデータの比較
+①もう少し範囲絞る可能性 ②正規分布ではない可能性 が考えられる
+
+![櫻木さんの実験データより](hist_hr.png)
+
+```{r, echo=FALSE}
+hist(rnorm(1000,75, 10))
+```
+
+上記の条件の元，各秒数(25, 35,
+45秒)に対して，それぞれ2個ずつデータを生成。　　
+以下がそのプロット図，横軸にパーセント化されたBPM，縦軸にscore
+
+```{r, echo=FALSE}
+#function作成
+sample_rep_normal <- function(real_beat,bias,SD){
+  report_lists <- list()
+  for(i in 1:length(real_beat)){
+    report_lists [[i]] <- rnorm(1,real_beat[i]*bias,SD)
+  }
+  do.call(rbind,report_lists) %>% as.vector()
+}
+
+#パラメータ設定
+time_list <- c(25,25,35,35,45,45)
+bias_is <- 0.5
+sd <- 8
+BPM_vec <- make_BPM(200,75, 10)
+reports_list <- c()
+
+#サンプリング
+for(i in 1:length(BPM_vec)){
+  reals <- c()
+  reals <- time_list * BPM_vec[i]
+  sample_vec <- sample_rep_normal(trunc(reals),bias_is,sd)
+  score_lis <- list()
+  
+  for(j in 1:length(time_list)){
+   score_lis[[j]] <- hbc(reals[j],sample_vec[j])
+  }
+   reports_list[[i]] <- mean(do.call(rbind,score_lis))
+}
+
+
+all_reports_df <-data.frame(bpm = BPM_vec, score = do.call(rbind,reports_list))
+plot(all_reports_df[,1],all_reports_df[,2],xlab="BPM",ylab="score")
+cor(all_reports_df[,1],all_reports_df[,2])
+
+```
+
+上記のサンプリングを，成績ごとに複数回実施した図。
+上の図では，横軸に相関係数，縦に頻度が示されている。\
+色は検出確率を表す。\
+
+課題成績（bias）に従い，明確に負の相関が出現し始めている。
+
+下の図は，横軸にp値をプロットしたものであり，p =
+.05を赤線で示している。\
+
+成績が低い場合にはそうでもないが，高い場合に顕著に有意差がでやすくなっている。
+
+```{r, echo=FALSE}
+time_list <- c(25,25,35,35,45,45)
+reports_prob <- seq(0.2,0.8,0.2)
+BPM_vec <- make_BPM(100,75, 10)
+reports_list <- c()
+sum_list <- list()
+cor_list <- list()
+ps_list <- list()
+
+for(k in 1:length(reports_prob)){
+  cors_df <- c()
+  ps_df <- c()
+  for(l in 1:200){
+  for(i in 1:length(BPM_vec)){
+  reals <- c()
+  reals <- time_list * BPM_vec[i]
+  sample_vec <- sample_rep_normal(trunc(reals),reports_prob[k],sd)
+  score_lis <- list()
+  
+  for(j in 1:length(time_list)){
+   score_lis[[j]] <- hbc(reals[j],sample_vec[j])
+  }
+   reports_list[[i]] <- mean(do.call(rbind,score_lis))
+  }
+  cors_df <- rbind(cors_df,
+                   data.frame(group = reports_prob[k] %>% as.factor(),
+                              cors = cor(BPM_vec,do.call(rbind,reports_list))))
+  ps_df <- rbind(ps_df,
+                   data.frame(group = reports_prob[k] %>% as.factor(),
+                              ps = cor.test(BPM_vec,do.call(rbind,reports_list))$p.value))
+}
+  cor_list[[k]] <- cors_df
+  ps_list[[k]] <- ps_df
+}
+rsd <- do.call(rbind,cor_list)
+rsd$group <- rsd$group %>% as.character() %>% as.numeric()
+pr <- rsd %>% ggplot(aes(x=cors,group = group,fill=group)) +
+  geom_histogram(position = "identity", alpha=.75)+ theme(text = element_text(size = 24),legend.position = "off")+xlab("r_value")
+
+psd <- do.call(rbind,ps_list)
+psd$group <- psd$group %>% as.character() %>% as.numeric()
+pp<- psd%>% ggplot(aes(x=ps,fill=group,group = group)) +
+  geom_histogram(position = "identity", alpha=.75)+ geom_vline(xintercept = .05, colour = "red")+xlab("p_value")+
+  ylab("")+labs(fill="Bias")+ theme(text = element_text(size = 24))
+
+pr + pp
+
+```
+
+上記の関係について，より詳細に検討した図。
+横軸に課題成績（＝bias），縦軸にBPMと課題成績の相関値を取っている。
+
+今回のシミュレーションのセッティングである場合，biasが60%である区間より相関値が上昇し，最終的にr
+= -.4付近まで上昇している。
+
+```{r, echo=FALSE}
+time_list <- c(25,25,35,35,45,45)
+reports_prob <- seq(0.01,0.99,0.01)
+BPM_vec <- make_BPM(500,75, 10)
+reports_list <- c()
+sum_list <- list()
+
+for(k in 1:length(reports_prob)){
+  ds <- c()
+  for(l in 1:100){
+  for(i in 1:length(BPM_vec)){
+  reals <- c()
+  reals <- time_list * BPM_vec[i]
+  sample_vec <-  sample_rep_normal(trunc(reals),reports_prob[k],sd)
+  score_lis <- list()
+  
+  for(j in 1:length(time_list)){
+   score_lis[[j]] <- hbc(reals[j],sample_vec[j])
+  }
+   reports_list[[i]] <- mean(do.call(rbind,score_lis))
+  }
+  dd <- do.call(rbind,reports_list)
+  dds <- cbind(BPM_vec,dd)
+  dds <- dds[!is.infinite(rowSums(dds)),]
+  ds <- rbind(ds,data.frame(group = reports_prob[k],cors = cor(dds[,1],dds[,2]) %>% as.numeric()))        
+  }
+  sum_list[[k]] <- ds
+}
+
+do.call(rbind,sum_list)  %>%  ggplot(aes(x=group,y=cors,col=group)) +
+  geom_point()+ggtitle("成績と相関係数の関係を兼ねた散布図")
+
+```
+
+この相関関係の出現について，数式的観点から検討を行う。
+今回データ生成を行った設定は以下の通りである。
+
+$$
+ErrorRate = \frac{|Real-Reported|}{Real} \\\\
+Real = Time * BPM \\\\
+Reported = Real * Accuracy + Error \\\\
+$$
+
+上記の条件を用いて，式変形を行う。
+
+また，成績が限りなく高い場合には，Accuracy =
+1となるため，以下のようになる。
+
+$$
+ErrorRate = \frac{|Time * BPM - (Time * BPM * Accuracy + Error)|}{Time * BPM} \\\\
+=  \frac{|-Error|}{Time * BPM} \\\\
+$$
+
+この状況で，BPMが増化する場合，Timeは固定値であるため，分母も大きくなり，ErrorRateが減少することが考えられる。
+
+よって，Accuracyが非常に高い場合の成績に対して，BPMによる影響があることは，数式的に明らかであると考えられる。
+
+```{r, echo=FALSE}
+vs <- c()
+for(j in 1:10)
+for(i in 1:120){
+  vs  = rbind(vs,data.frame(score = - abs(-j)/25*i,Error = j,bpm = i))
+}
+
+vs %>% ggplot(aes(x=bpm,y=score,group=Error,col=Error)) + geom_line(size=1.5) +
+  geom_point(aes(x=120,y = - abs(-5)/25*120),shape=21,size=10)+
+  geom_point(aes(x=120,y = - abs(-8)/25*120),shape=21,size=10)+ 
+  theme(text = element_text(size = 24))+xlab("BPM")+ylab("Score")
+```
+
+しかし，上記のように，Errorも変化しうる式となっている。
+
+つまり，成績に関連しない，単なる報告のばらつきが含まれるかによっても，この確率の出現割合は変化すると考えられる。\
+しかし，上記でもみたように，sdの分布としては，5から8付近であるため，この情報を反映させると，図の〇で囲まれている直線であり，やはり負の相関が発生する要因となっていることがわかる。
+
+これは，成績が悪いグループの場合には，BPMによる影響がない一方で，良いグループの場合には，BPMにより成績が課題評価されることを意味している。\
+
+つまり，Ainleyが言及した，***心臓の構造的な程度を反映している程度は，個人の成績に依存して異なる***という，非常に問題のある結果といえる。\
+
+```{r, echo=FALSE}
+corr_table <- data.frame(Error = 1:10,
+                         slope = vs[vs$bpm=="120",1]/120)
+
+datatable(corr_table)
+```
+
+この対抗策としては，分母に最初からBPMを導入しないように，心拍数基準で課題時間を決定する手法が考えられる。\
+これにより，分母は固定値となることから，成績算出の際に，個人の身体の構造的情報が導入されないことが考えられる。
+
+しかし，身体の構造情報が，HCTにおいて，どこまで影響を及ぼすのかついては，言及できていない。\
+提案した指標を用いた上で，構造情報がどのように影響するのかを検討することで，その妥当性がより詳細に検討できると考えられる。
+
+シミュレーション2と併せて考えると，心拍が60(\~90)回発生した際に，何度検出することができるのかという課題を6回以上行うことで，データ精度，ＢＰＭとの相関の除去の観点から妥当であることが考えられる。
+
+平均75秒とした場合，10回行っても12.5分であるため，他のタスクと併せて実施することや，一回のタスクの所要時間を考えても充分に行うことができると考えられる。
+
+\
+学習効果や，注意の個人差等は別で議論が必要だが，短い時間であればこれらは影響していなかった，無視できるレベルであったというのはただの推測なので，せめて数値で出た部分は統制するべきだと思う。
+
+## 4. interoceptive awarenessの算出手法
+
+### 背景
+
+Garfinkel et al.
+（2015）の手法では，内受容への気づき指標は，心拍検出課題のトライアルごとに，自身の成績に対してどれくらい自信があるのかを，VASを用いて，0-100の間で評価を行う。
+
+このように取得されたデータを用いて，実際の成績と，その主観的な確信度の相関係数を算出することで評価されるとされている。
+
+Micah
+Allenの課題では，この指標の教示は，0であれば自信がない，あるいは推測をしてしまった，100であれば，自信がある，確実であるというようにされる。
+
+しかし，これは，awarenessの定義である，自身の内受容精度に対する主観的な気づきを定量評価するうえで，不適切であるといえる。　　
+
+自身の内受容精度がどれくらいであるのかを評価する際に，その客観的な指標として用いるのであれば，主観的に感じたその正答率そのまま回答させることが，概念としては妥当である。
+
+また，取得される指標は，相関係数を用いて算出されるため，内受容精度と自信が相関することをawarenessが高いとしている。\
+これは，相関の高い個人では，成績が向上するに従い，自信も向上し，自信があるときには高い成績であることを期待している。\
+この観点からも，自信は，成績に対する主観評価であるべきだと考えられる。
+
+この指標の得点が高い，つまり相関係数が高い場合には，精度と自信が同じような得点となる，あるいは，一定の差分をもって変化する必要があると考えられる。　　
+
+前者の場合，やはり主観的な評価は，自身の成績に対する主観的な評価であると考えられる。
+
+後者の場合，常に精度に対して，一定のバイアスが入っていることを意味している。\
+後にシミュレーションを行うが，これは，over/under
+estimateしている際にも，awarenessが高いと推定され，弁別できないことを意味する。
+
+加えて，相関分析はサンプルサイズに大きく左右される指標であるため，従来の心拍検出課題の試行数では，充分に信頼性の高い指標を算出できているかは不明である。
+
+#### 相関分析について
+
+相関分析はデータ数に大きい影響を受ける。\
+以下に，試行数ごとの信頼区間を示す。\
+
+ランダムに生成されたデータを平均とし（HCTの精度と仮定），正規分布からさらに算出（自信の報告と仮定）。\
+
+この状況下では，精度を常に平均としてサンプリングするため，両者の相関は非常に高くなることが期待される。
+
+このようなデータ生成過程を，100人分行った上で，相関係数の分布を図示すると，以下のようになる。
+
+横軸に，心拍検出課題におけるトライアル数，縦軸に相関係数を示す。
+
+トライアル数が少ない場合，ノイズの影響を強く受けてしまうことから，同じ値を共有するような，非常に強い相関関係のみられる変数間であっても，高い相関係数とはならない。
+
+```{r, echo=FALSE}
+lw_int <- c()
+hi_int <- c()
+for(i in 5:100){
+trialn <- i
+x <- rnorm(trialn,50,10)
+y <- rnorm(trialn,x,15)
+a <- ci_cor(
+  x = x,
+  y = y,
+  probs = c(0.025, 0.975),
+  method = c("pearson", "kendall", "spearman"),
+  type = c("normal", "bootstrap"),
+  boot_type = c("bca", "perc", "norm", "basic"),
+  R = 9999,
+  seed = 1111
+)
+lw_int <- append(lw_int,a$interval[1])
+hi_int <- append(hi_int,a$interval[2])
+}
+
+ggdata <- data.frame(low = lw_int,
+                        high = hi_int,
+                        sample_size = 5:100)
+p1 <- ggplot(ggdata,aes(x = sample_size, ymin = low, ymax = high))+
+  geom_ribbon(fill = "grey")+ggtitle("トライアル数ごとの信頼区間")
+
+ggdata2 <- subset(ggdata,ggdata$sample_size<=25)
+p2 <- ggplot(ggdata2,aes(x = sample_size, ymin = low, ymax = high))+
+  geom_ribbon(fill = "grey") + 
+    geom_vline(xintercept = c(6,12),col="#EE6363")+
+  ggtitle("HBCで用いられるトライアル数近辺での値")
+
+gridExtra::grid.arrange(p1,p2,nrow=1)
+
+```
+
+```{r, include=FALSE, echo=FALSE}
+#gganimate使ってみる
+point_list <- list()
+for(i in 1:100){
+  x <- rnorm(6,60,10)
+  y <- rnorm(6,x,10)
+  point_list[[i]] <- data.frame(x,y)
+}
+ani <- data.frame(num = rep(1:100,each=6),do.call(rbind,point_list))
+gi <- ggplot(ani,aes(x=x,y=y))+geom_point()+geom_smooth(method ="lm")+
+  guides(size = "none")+
+  transition_states(states=num,
+                    transition_length = 2,
+                    state_length = 2)
+x <- ani %>% group_by(num) %>% summarise(cors = cor(x,y)) 
+x <- as.vector(x[,2])
+d <- as.data.frame(x=x)
+p <- d%>% 
+  ggplot(aes(x=cors))+geom_density()
+
+```
+
+実際に，特定の数を平均とした正規分布から，6つの数をサンプリングすると，本来，平均値を共有する乱数であるため，強い関連が見られることが想定されるが，ばらつきが大きくみられる。\
+サンプリングされた変数の相関係数をみると，確かにr =
+.75という非常に高い数値付近で最大値が見られるものの，低い相関係数となる可能性も充分考えられる。
+
+```{r, echo=FALSE}
+gi
+p
+```
+
+このように，相関分析は，トライアル数が少ない場合，大きなばらつきを持つことが想定される。\
+そこで，相関分析を用いた場合の気づき指標の不安定性の評価を行う。\
+さらに，指標の目的を維持したまま，より安定した算出手法として考えられる，差分法を提案する。
+
+### 方法
+
+#### HCT課題の成績データの算出
+
+HCT課題の成績データは，先述のシミュレーション同様，個人ごとに異なる平均をもつ正規分布から，ランダムに生成されることを想定する。
+
+$$
+HBCscore　～　Normal(mean, sd)
+$$
+
+#### HBCの確信度データの算出方法
+
+導入の議論より，メタawarenessが，自身のHCT成績への評価であることを考慮し，成績を平均とした分布から値を算出することで，トライアルへの成績評価のシミュレーションデータとする。\
+この条件下において，標準偏差を操作することを，メタawarenessの操作とする。
+
+これは，標準偏差が大きい（＝メタawarenessが低くなる）ほど，実際の成績とはなれた報告をする可能性が高くなることを想定している。
+
+このデータ生成過程の想定下では，一貫して過大評価する（過小評価する），というような側面は考慮していない。　　
+
+しかし，現在用いられている相関係数を使用する場合においては，過大/過小評価の区別を分けることはできない。さらに，一定の値を過大評価する，と仮定すると，実際の成績とメタawarenessの値は，常に高い相関を示すことになるため，この種の歪みは相関係数では検出できない。
+そのため，一旦この生成過程を採用する。　　
+
+過大(過小)評価に関しては，標準偏差を操作した場合のシミュレーション実施後に行う。
+
+$$
+CONFIDENCEscore　～　Normal(HBCscore, meta)
+$$
+
+### 結果
+
+#### 確信度を操作
+
+横軸に確信度（正規分布の標準偏差）縦軸に差分，および相関を示している。\
+差分の分布では，SDが大きくなるにつれ，HCTの成績とその自己評価が線形の関係を持つ。\
+相関を用いた指標の場合においても線形の関係は見られるが，その安定性がやや低下する。
+
+どちらの手法であっても，trial数を増やすことにより，この線形の関係は安定すると考えられる。
+
+```{r, include=FALSE, echo=FALSE}
+cors <- c()
+diffs <- c()
+sums<-c()
+sen_range <- seq(10,50,5)
+
+for (k in 1:length(sen_range)){
+  for(j in 1:10){
+    hbc_score <- rnorm(6, 60, 10)
+    confidence <-c()
+    for (i in length(hbc_score)){
+      confidence <- append(confidence,
+                           rnorm(length(hbc_score),
+                                 hbc_score,
+                                 sen_range[k]))
+    }
+    diffs <- rbind(diffs,as.data.frame(
+      cbind(sens = sen_range[k],
+                  R =  mean(hbc_score-confidence))))
+    sums <- rbind(sums,as.data.frame(
+      cbind(sens = sen_range[k],
+            R =  mean(abs(hbc_score-confidence)))))
+    cors<-rbind(cors, as.data.frame(
+      cbind(sens = sen_range[k],
+            R = cor(hbc_score,confidence))))
+  }
+}
+
+plot(diffs$sens,diffs$R, ylab="cor_eff",xlab="sensitivity",
+     main="感度を操作した場合の差分値分布")
+plot(cors$sens,cors$R, ylab="cor_eff",xlab="sensitivity",
+     main="感度を操作した場合の相関値分布")
+
+#絶対値化？
+p21 <- sums %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial6回の差分分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)
+
+p22 <- cors %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial6回の相関分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)+ 
+    geom_hline(yintercept = 0,col="#EE6363")
+
+cors <- c()
+diffs <- c()
+sums<-c()
+sen_range <- seq(10,50,5)
+
+for (k in 1:length(sen_range)){
+  for(j in 1:10){
+    hbc_score <- rnorm(12, 60, 10)
+    confidence <-c()
+    for (i in length(hbc_score)){
+      confidence <- append(confidence,
+                           rnorm(length(hbc_score),
+                                 hbc_score,
+                                 sen_range[k]))
+    }
+    diffs <- rbind(diffs,as.data.frame(
+      cbind(sens = sen_range[k],
+                  R =  mean(hbc_score-confidence))))
+    sums <- rbind(sums,as.data.frame(
+      cbind(sens = sen_range[k],
+            R =  mean(abs(hbc_score-confidence)))))
+    cors<-rbind(cors, as.data.frame(
+      cbind(sens = sen_range[k],
+            R = cor(hbc_score,confidence))))
+  }
+}
+
+plot(diffs$sens,diffs$R, ylab="cor_eff",xlab="sensitivity",
+     main="感度を操作した場合の差分値分布")
+plot(cors$sens,cors$R, ylab="cor_eff",xlab="sensitivity",
+     main="感度を操作した場合の相関値分布")
+
+#絶対値化？
+p23 <- sums %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial12回の差分分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)
+
+p24 <- cors %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial12回の相関分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)+ 
+    geom_hline(yintercept = 0,col="#EE6363")
+
+```
+
+```{r, echo=FALSE}
+gridExtra::grid.arrange(p21,p22,p23,p24,nrow=2)
+```
+
+#### 外れ値の導入
+
+相関分析は外れ値に対して非常に脆弱な指標である。
+
+そのため，デモンストレーションとして，確信度の値のうち，1つを0にする場合のデータを示す（一度も心拍を感じなかったケース）。　　
+
+左側に差分値の合計，右側に相関図をプロット
+相関図は外れ値を含めると分布が0付近になる一方で，差分値は関係を維持している。　　
+
+これらの結果より，トライアルごとの内受容への気づきは，差分を用いた方がより信頼性の高い指標となることが示唆される。
+
+```{r, include=FALSE, echo=FALSE}
+cors <- c()
+sums<-c()
+sen_range <- seq(10,50,5)
+
+#攪乱項
+turb <- 0
+
+for (k in 1:length(sen_range)){
+  for(j in 1:10){
+    hbc_score <- rnorm(6, 60, 10)
+    confidence <-c()
+    for (i in length(hbc_score)){
+      confidence <- append(confidence,
+                           rnorm(length(hbc_score),
+                                 hbc_score,
+                                 sen_range[k]))
+    }
+    
+    sums <- rbind(sums,as.data.frame(
+      cbind(sens = sen_range[k],
+            R =  mean(abs(hbc_score-append(confidence[-1],turb))))))
+    cors<-rbind(cors, as.data.frame(
+      cbind(sens = sen_range[k],
+            R = cor(hbc_score,append(confidence[-1],turb)))))
+  }
+}
+
+#絶対値化？
+p41<-sums %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial6回の差分分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)
+
+p42<-cors %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial6回の相関分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)+ 
+    geom_hline(yintercept = 0,col="#EE6363")
+
+cors <- c()
+sums<-c()
+sen_range <- seq(10,50,5)
+
+#攪乱項
+turb <- 0
+
+for (k in 1:length(sen_range)){
+  for(j in 1:10){
+    hbc_score <- rnorm(12, 60, 10)
+    confidence <-c()
+    for (i in length(hbc_score)){
+      confidence <- append(confidence,
+                           rnorm(length(hbc_score),
+                                 hbc_score,
+                                 sen_range[k]))
+    }
+    
+    sums <- rbind(sums,as.data.frame(
+      cbind(sens = sen_range[k],
+            R =  mean(abs(hbc_score-append(confidence[-1],turb))))))
+    cors<-rbind(cors, as.data.frame(
+      cbind(sens = sen_range[k],
+            R = cor(hbc_score,append(confidence[-1],turb)))))
+  }
+}
+
+#絶対値化？
+p43<-sums %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial12回の差分分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)
+
+p44<-cors %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial12回の相関分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)+ 
+    geom_hline(yintercept = 0,col="#EE6363")
+
+```
+
+```{r, echo=FALSE}
+gridExtra::grid.arrange(p41,p42,p43,p44,nrow=2)
+```
+
+### 一定した過大評価，過小評価に対する各指標の反応性
+
+これまでの仮定では，HCTの成績に対して，一定のばらつきを想定し，その値をメタawareness傾向と定義してシミュレーションを行った。\
+その他のメタawarenessが歪むケースとして，過大，あるいは過小に自身の内受容感覚を評価し続けるケースがあると考えられる。
+
+過大評価等を評価する場合には，成績に一定の値にノイズを加えた値とし，データの生成過程とする。
+この環境下であっても，差分法であればきれいに評価できることが想定される。
+サンプリング状況としては以下の式を設定する。
+
+これまではSDを操作していたが，自信を算出する際の平均値にバイアスをかけることで，メタawarenessのover/underを表現する。
+
+$$
+CONFIDENCEscore　～　Normal(HBCscore + meta, sd)
+$$ 
+データサンプリングの設定は以下の通り\
+meta : -15から15まで，5刻み\
+SD : 5
+
+```{r, echo=FALSE}
+cors <- c()
+diffs <- c()
+sums<-c()
+sen_range <- seq(-25,25,5)
+
+for (k in 1:length(sen_range)){
+  for(j in 1:10){
+    hbc_score <- rnorm(6, 60, 10)
+    confidence <-c()
+    for (i in length(hbc_score)){
+      confidence <- append(confidence,
+                           rnorm(length(hbc_score),
+                                 hbc_score + sen_range[k],
+                                 5))
+    }
+    diffs <- rbind(diffs,as.data.frame(
+      cbind(sens = sen_range[k],
+                  R =  mean(hbc_score-confidence))))
+    sums <- rbind(sums,as.data.frame(
+      cbind(sens = sen_range[k],
+            R =  mean(abs(hbc_score-confidence)))))
+    cors<-rbind(cors, as.data.frame(
+      cbind(sens = sen_range[k],
+            R = cor(hbc_score,confidence))))
+  }
+}
+
+
+#絶対値化？
+bsen1 <- sums %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial6回の差分分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)
+
+bsen2 <- cors %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial6回の相関分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)+ 
+    geom_hline(yintercept = 0,col="#EE6363")
+
+cors <- c()
+diffs <- c()
+sums<-c()
+
+for (k in 1:length(sen_range)){
+  for(j in 1:10){
+    hbc_score <- rnorm(12, 60, 10)
+    confidence <-c()
+    for (i in length(hbc_score)){
+      confidence <- append(confidence,
+                           rnorm(length(hbc_score),
+                                 hbc_score + sen_range[k],
+                                 5))
+    }
+    diffs <- rbind(diffs,as.data.frame(
+      cbind(sens = sen_range[k],
+                  R =  mean(hbc_score-confidence))))
+    sums <- rbind(sums,as.data.frame(
+      cbind(sens = sen_range[k],
+            R =  mean(abs(hbc_score-confidence)))))
+    cors<-rbind(cors, as.data.frame(
+      cbind(sens = sen_range[k],
+            R = cor(hbc_score,confidence))))
+  }
+}
+
+#絶対値化？
+bsen3 <- sums %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial12回の差分分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)
+
+bsen4 <- cors %>% group_by(sens) %>% 
+  summarise(mean=mean(R),se = sd(R)/sqrt(n())) %>% 
+  ggplot(aes(x=sens,y=mean))+
+  geom_errorbar(size=1,aes(ymin=mean-se,ymax=mean+se,width=0.2))+
+  ggtitle("各群10人,trial12回の相関分布")+
+  theme_classic()+
+  geom_point(size=5,shape=15)+ 
+    geom_hline(yintercept = 0,col="#EE6363")
+
+gridExtra::grid.arrange(bsen1,bsen2,bsen3,bsen4,nrow=2)
+
+```
+
+毎回同じ程度のずれが入るため，相関値では，over/under関わらず，非常に高い相関値に収束している。\
+差分値を用いた手法では，バイアスの有無をきれいに区別できているものの，そのover/underの区分についてはできていない。
+
+## 5. TETとHCTの数式的な関連
+
+$$
+ErrorRate = \frac{|Real-Reported|}{Real} \\\\
+Real = Time * BPM \\\\
+Reported = Real * Accuracy + Error \\\\
+$$
+
+\$\$ ErrorRate IAcc =
+\frac{|Time * BPM-( Time * BPM * bias + Error)|}{Time * BPM} \\\\
+
+ErrorRate Time = \frac{|Time - (Time * bias + Error)|}{Time} \\\\ \$\$
+
+### biasの値を0-1の一様分布から生成（ランダムなので独立）
+
+エラーが同一の分布を想定すると相関でそう
+
+```{r}
+set.seed(222)
+
+
+bias_i <- runif(100,0,1)
+bias_t <- runif(100,0,1)
+
+BPM <- rnorm(100,75,10)/60
+
+Error_i <- rnorm(100,5,5)
+Error_t <- rnorm(100,5,5)
+
+Time <- 25
+
+IAcc <- abs(Time*BPM - (Time*BPM*bias_i +Error_i))/Time*BPM
+Times <- abs(Time-(Time*bias_t+Error_t))/Time
+
+cor(IAcc,Times)
+
+IAcc <- abs(Time*BPM - (Time*BPM*bias_i +Error_i))/Time*BPM
+Times <- abs(Time-(Time*bias_t+Error_i))/Time
+
+cor(IAcc,Times)
+
+```
+
+## 6. t検定やりたい場合の条件の確定
+```{r}
+#設定すべきパラメータ
+diff <- .15
+n <- 30
+time <- 60
+trial <- 12
+
+#サンプリングされたデータと，yの値から，相関分析のパワーを算出？
+maxlist <- list()
+for(i in 3:trial){
+  time_vec <- c()
+  for(j in 25:time){
+    time_vec <- append(time_vec,
+                       calc_t_val(n,diff,j,i))
+  }
+  maxlist[[i]] <- time_vec
+}
+
+pd <- do.call(rbind,maxlist)
+t_vec <- seq(1,72,2)
+d_vec <- seq(2,72,2)
+
+mt_df <- cbind(trialN = 3:trial,
+               pd[,t_vec])%>% 
+  as.data.frame()
+md_df <- cbind(trialN = 3:trial,
+               pd[,d_vec])%>% 
+  as.data.frame()
+
+colnames(mt_df)<-c("trialN",25:time)
+colnames(md_df)<-c("trialN",25:time)
+
+meantp <- mt_df %>% pivot_longer(cols = 2:ncol(mt_df),
+                       names_to = "time",
+                       values_to = "diff") %>% 
+  ggplot(aes(x=time,y=trialN,fill=diff))+
+  geom_tile()+
+  scale_fill_gradientn("value", colours = rev(brewer.pal(9, "Spectral")), na.value = "white")+
+  ggtitle("t_val")
+
+meandd <- md_df %>% pivot_longer(cols = 2:ncol(md_df),
+                       names_to = "time",
+                       values_to = "diff") %>% 
+  ggplot(aes(x=time,y=trialN,fill=diff))+
+  geom_tile()+
+  scale_fill_gradientn("value", colours = rev(brewer.pal(9, "Spectral")), na.value = "white")+
+  ggtitle("diff_val")
+
+meantp | meandd
+
+```
+
+## 相関の効果測定を指標とした決定
+1.  正規分布から，Biasを，サンプルサイズ分生成（操作可能変数 n）
+2.  Biasの値と相関する仮想変数のデータ（操作可能変数 r），yを生成
+3.  Biasの値を元に，心拍検出課題のシミュレーションデータ生成（操作可能変数
+    trial, time）
+4.  3のデータを成績に変換（d）
+5.  yとdの真の相関はrであるため，これを検出するためのパワーアナリシスを行う（αの推定）
+6.  上記より，trial, time, r, nごとにデータを生成し，色でパワーを表現，α
+    = .8らへんを最適として，どこに来るのか
+    1.  三次元プロットも可能だが，nは全部のシミュレーションで決め打ち，rは低中高で三種類にして，複数の二次元にした方がよさそう
+
+```{r}
+#設定すべきパラメータ
+r <- .5
+n <- 30
+time <- 60
+trial <- 12
+
+#サンプリングされたデータと，yの値から，相関分析のパワーを算出？
+maxlist <- list()
+for(i in 3:trial){
+  time_vec <- c()
+  for(j in 25:time){
+    time_vec <- append(time_vec,
+                       calc_r_max(n,r,j,i))
+  }
+  maxlist[[i]] <- time_vec
+}
+
+mr_df <- cbind(trialN = 3:trial,
+               do.call(rbind,maxlist))%>% 
+  as.data.frame()
+colnames(mr_df)<-c("trialN",25:time)
+
+mr_df %>% pivot_longer(cols = 2:ncol(mr_df),
+                       names_to = "time",
+                       values_to = "diff") %>% 
+  ggplot(aes(x=time,y=trialN,fill=diff))+
+  geom_tile()+
+  scale_fill_gradientn("value", colours = rev(brewer.pal(9, "Spectral")), na.value = "white")
+
+```
+
+## 似たようなことを，test-retest的にやってみる
+
+```{r}
+#設定すべきパラメータ
+n <- 50
+time <- 60
+trial <- 12
+
+#サンプリングされたデータと，yの値から，相関分析のパワーを算出？
+maxlist <- list()
+for(i in 3:trial){
+  time_vec <- c()
+  for(j in 25:time){
+    time_vec <- append(time_vec,
+                       calc_test_retest(n,j,i))
+  }
+  maxlist[[i]] <- time_vec
+}
+
+mr_df <- cbind(trialN = 3:trial,
+               do.call(rbind,maxlist))%>% 
+  as.data.frame()
+colnames(mr_df)<-c("trialN",25:time)
+
+mr_df %>% pivot_longer(cols = 2:ncol(mr_df),
+                       names_to = "time",
+                       values_to = "diff") %>% 
+          ggplot(aes(x=as.numeric(time),y=trialN,fill=diff))+
+          geom_tile()+
+          scale_fill_gradientn(limits = c(.5,1),
+                               "value", 
+                               colours = rev(brewer.pal(10, "Spectral")), 
+                               na.value = "#5E4FA2") + theme(text = element_text(size = 24))
+
+```
